@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="go2-panel-token" content="{{ csrf_token }}">
+    <title>GO2 Air 面板设置</title>
+    <link rel="stylesheet" href="/static/workbench.css">
+    <link rel="stylesheet" href="/static/settings.css">
+  </head>
+  <body>
+    <main class="shell settings-shell">
+      <header class="topbar">
+        <div><p class="eyebrow">LOCAL PANEL SETTINGS</p><h1>面板设置</h1></div>
+        <div class="topbar-actions">
+          <nav class="page-nav" aria-label="主导航">
+            <a class="nav-link" href="/">动作台</a>
+            <a class="nav-link active" href="/settings" aria-current="page">设置</a>
+          </nav>
+          <div id="settingsConnectionBadge" class="badge offline">读取中</div>
+        </div>
+      </header>
+
+      <section class="hero panel settings-hero">
+        <div>
+          <p class="section-label">连接中心</p>
+          <h2 id="settingsConnectionTitle">正在读取六机编队</h2>
+          <p id="settingsConnectionDetail" class="muted">连接管理只建立 WebRTC 与读取状态，不发送动作。</p>
+        </div>
+        <a class="button primary button-link" href="/">返回动作台</a>
+      </section>
+
+      <section class="panel settings-section">
+        <div class="section-heading">
+          <div><p class="section-label">FLEET / LOCAL STA</p><h2>设备与网络</h2></div>
+          <span id="settingsFleetCount" class="tag">0 / 0 在线</span>
+        </div>
+        <p class="editor-note">地址来自本机受保护配置；页面仅显示 IP 和序列号末六位，不会读取或显示设备密钥。</p>
+        <div id="settingsRobotGrid" class="settings-robot-grid" aria-live="polite"></div>
+        <div class="button-row settings-actions">
+          <button id="settingsConnectButton" class="button primary" disabled>连接 / 重试离线设备</button>
+          <button id="settingsRefreshButton" class="button ghost" disabled>刷新只读状态</button>
+          <button id="settingsDisconnectButton" class="button ghost" disabled>断开全部连接</button>
+        </div>
+      </section>
+
+      <section class="settings-grid">
+        <article class="panel settings-section">
+          <div class="section-heading"><div><p class="section-label">UI PREFERENCES</p><h2>动作台偏好</h2></div><span class="tag">仅存本机浏览器</span></div>
+          <form id="preferencesForm" class="preferences-form">
+            <label>
+              <span>进入动作台时默认选择</span>
+              <select id="initialSelection">
+                <option value="all">全部设备</option>
+                <option value="online">仅在线设备</option>
+                <option value="none">不自动选择</option>
+              </select>
+              <small>只影响首次打开页面；执行前仍需确认现场净空。</small>
+            </label>
+            <label>
+              <span>状态轮询间隔</span>
+              <select id="pollIntervalMs">
+                <option value="1000">1 秒</option>
+                <option value="2000">2 秒（推荐）</option>
+                <option value="5000">5 秒</option>
+              </select>
+              <small>较短间隔能更快看到状态变化，但会增加本机请求频率。</small>
+            </label>
+            <label class="toggle-setting">
+              <input id="autoConnect" type="checkbox">
+              <span><b>自动发现并连接</b><small>默认开启；换 WiFi 后按序列号发现新地址并自动补连。</small></span>
+            </label>
+            <label class="toggle-setting">
+              <input id="compactCards" type="checkbox">
+              <span><b>紧凑设备卡片</b><small>缩短动作台设备卡高度，六机编队更集中。</small></span>
+            </label>
+            <div class="button-row form-actions">
+              <button id="resetPreferencesButton" type="button" class="button ghost">恢复默认</button>
+              <button type="submit" class="button primary">保存偏好</button>
+            </div>
+          </form>
+        </article>
+
+        <article class="panel settings-section">
+          <div class="section-heading"><div><p class="section-label">SAFETY BOUNDARY</p><h2>安全边界</h2></div><span class="tag">后端强制</span></div>
+          <dl class="safety-list">
+            <div><dt>服务范围</dt><dd>仅监听 127.0.0.1:8765</dd></div>
+            <div><dt>设备凭据</dt><dd>仅由 Python 后端从 .env 读取</dd></div>
+            <div><dt>动作目标</dt><dd>必须在动作台明确框选</dd></div>
+            <div><dt>现场确认</dt><dd>每次动作均需重新勾选净空</dd></div>
+            <div><dt>高风险动作</dt><dd>确认短语并长按 3 秒</dd></div>
+          </dl>
+        </article>
+      </section>
+
+      <section class="panel activity settings-activity">
+        <div class="section-heading"><div><p class="section-label">SETTINGS LOG</p><h2>设置页记录</h2></div><button id="clearSettingsActivity" class="text-button">清空页面记录</button></div>
+        <ol id="settingsActivityList" aria-live="polite"><li><time>--:--:--</time><span>设置页面已就绪。</span></li></ol>
+      </section>
+    </main>
+    <script src="/static/settings.js" defer></script>
+  </body>
+</html>

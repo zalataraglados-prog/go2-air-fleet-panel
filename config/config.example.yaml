@@ -1,0 +1,19 @@
+connection:
+  # local_sta: PC and GO2 are on the same router.
+  # local_ap: PC is connected directly to the GO2 Wi-Fi hotspot.
+  mode: local_sta
+  ip: null
+  connect_timeout: 30.0
+  # GO2 firmware >= 1.1.15 requires its per-device key.
+  require_aes_key: true
+
+# Reserved for the later motion/watchdog phase. Nothing in the current phase
+# reads these values to send a motion command.
+safety:
+  max_vx: 0.25
+  max_vy: 0.20
+  max_yaw: 0.50
+  watchdog_timeout: 0.40
+
+logging:
+  level: INFO

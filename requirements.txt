@@ -1,0 +1,10 @@
+# Versions verified for this project on Windows with Python 3.12 (2026-09-02).
+unitree_webrtc_connect==2.2.0
+# Transitive WebRTC versions actually exercised by the test environment.
+aiortc==1.15.0
+aioice==0.10.2
+PyYAML==6.0.3
+python-dotenv==1.2.3
+psutil==7.2.2
+# Local-only unified control panel. The server binds to 127.0.0.1.
+Flask==3.1.3

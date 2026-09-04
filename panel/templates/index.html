@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="go2-panel-token" content="{{ csrf_token }}">
+    <title>GO2 Air 本地控制台</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">LOCAL SAFETY CONSOLE</p>
+          <h1>GO2 Air 控制台</h1>
+        </div>
+        <div id="connectionBadge" class="badge offline">未连接</div>
+      </header>
+
+      <section class="hero panel">
+        <div>
+          <p class="section-label">连接</p>
+          <h2 id="connectionTitle">机器狗当前未连接</h2>
+          <p id="connectionDetail" class="muted">面板只在本机运行；点击连接后才会建立 WebRTC 会话。</p>
+        </div>
+        <div class="button-row">
+          <button id="connectButton" class="button primary">连接机器狗</button>
+          <button id="disconnectButton" class="button ghost" disabled>断开</button>
+          <button id="refreshButton" class="button ghost" disabled>刷新状态</button>
+        </div>
+      </section>
+
+      <section class="telemetry-grid" aria-label="机器狗状态">
+        <article class="metric panel">
+          <span>电量</span>
+          <strong id="batteryValue">--</strong>
+          <small id="voltageValue">等待状态</small>
+        </article>
+        <article class="metric panel">
+          <span>姿态 R / P / Y</span>
+          <strong id="rpyValue">-- / -- / --</strong>
+          <small>弧度</small>
+        </article>
+        <article class="metric panel">
+          <span>运动状态</span>
+          <strong id="modeValue">--</strong>
+          <small id="velocityValue">速度 --</small>
+        </article>
+        <article class="metric panel">
+          <span>足端受力</span>
+          <strong id="footValue">--</strong>
+          <small>四足合计</small>
+        </article>
+      </section>
+
+      <section class="control-grid">
+        <article class="panel controls">
+          <div class="section-heading">
+            <div>
+              <p class="section-label">已验收动作</p>
+              <h2>姿态控制</h2>
+            </div>
+            <span class="tag">长按 1.2 秒</span>
+          </div>
+
+          <label class="clearance">
+            <input id="clearanceCheck" type="checkbox">
+            <span>现场已清空，地面水平防滑，人员远离机器狗</span>
+          </label>
+
+          <div class="action-row">
+            <button class="hold-button" data-action="stand_up" disabled>
+              <span class="hold-fill"></span>
+              <span class="hold-copy"><b>起立</b><small>按住直到完成确认</small></span>
+            </button>
+            <button class="hold-button" data-action="stand_down" disabled>
+              <span class="hold-fill"></span>
+              <span class="hold-copy"><b>趴下</b><small>按住直到完成确认</small></span>
+            </button>
+          </div>
+
+          <button id="stopButton" class="stop-button" disabled>
+            <span>STOP MOVE</span>
+            <small>立即发送高优先级停止运动</small>
+          </button>
+          <p class="fine-print">StopMove 不是物理急停；必要时仍应直接断电。</p>
+        </article>
+
+        <article class="panel roadmap">
+          <p class="section-label">分阶段开放</p>
+          <h2>能力面板</h2>
+          <div class="roadmap-item ready">
+            <div><b>连接与状态</b><small>常驻会话、遥测摘要</small></div>
+            <span>可用</span>
+          </div>
+          <div class="roadmap-item ready">
+            <div><b>姿态动作</b><small>起立、趴下、StopMove</small></div>
+            <span>可用</span>
+          </div>
+          <div class="roadmap-item locked">
+            <div><b>行走与转向</b><small>等待速度方向与失联保护标定</small></div>
+            <span>锁定</span>
+          </div>
+          <div class="roadmap-item locked">
+            <div><b>动作与感知</b><small>手势、相机、雷达逐项验收</small></div>
+            <span>锁定</span>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel activity">
+        <div class="section-heading">
+          <div>
+            <p class="section-label">操作记录</p>
+            <h2>本次会话</h2>
+          </div>
+          <button id="clearActivity" class="text-button">清空页面记录</button>
+        </div>
+        <ol id="activityList" aria-live="polite">
+          <li><time>--:--:--</time><span>面板已就绪，尚未连接机器狗。</span></li>
+        </ol>
+      </section>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

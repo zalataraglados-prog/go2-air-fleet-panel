@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="go2-panel-token" content="{{ csrf_token }}">
+    <title>GO2 Air RTS 多机动作工作台</title>
+    <link rel="stylesheet" href="/static/workbench.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div><p class="eyebrow">LOCAL MULTI-ROBOT WORKBENCH</p><h1>GO2 Air RTS 多机动作工作台</h1></div>
+        <div class="topbar-actions">
+          <nav class="page-nav" aria-label="主导航">
+            <a class="nav-link active" href="/" aria-current="page">动作台</a>
+            <a class="nav-link" href="/settings">设置</a>
+          </nav>
+          <div id="connectionBadge" class="badge offline">未连接</div>
+        </div>
+      </header>
+
+      <section class="hero panel">
+        <div><p class="section-label">常驻会话</p><h2 id="connectionTitle">机器狗当前未连接</h2><p id="connectionDetail" class="muted">页面只在本机运行；连接后由编队选择决定每次动作的执行对象。</p></div>
+        <a class="button ghost button-link" href="/settings">管理连接与偏好</a>
+      </section>
+
+      <section class="panel fleet-section">
+        <div class="section-heading">
+          <div><p class="section-label">RTS / 可扩展编队</p><h2>框选执行对象</h2></div>
+          <span id="selectionSummary" class="tag">已选择 0 / 0</span>
+        </div>
+        <p id="selectionHelp" class="editor-note">拖动空白区域框选；单击选择一个；Shift / Ctrl / ⌘ 单击可追加或取消。下方所有动作只发送给选中对象。</p>
+        <div id="selectionBoard" class="selection-board" aria-label="机器狗编队选择区">
+          <div id="fleetRobots" class="robot-grid" role="listbox" aria-multiselectable="true"></div>
+          <div id="selectionMarquee" class="selection-marquee" hidden></div>
+        </div>
+        <div class="button-row fleet-toolbar">
+          <button id="selectAllButton" class="button ghost">全选</button>
+          <button id="clearSelectionButton" class="button ghost">清除选择</button>
+          <a class="text-link" href="/settings">设备离线？前往设置</a>
+        </div>
+      </section>
+
+      <section class="panel safety-deck">
+        <div class="safety-copy"><p class="section-label">执行锁</p><h2>确认选中对象的现场</h2><p>每个选中对象独立预检；动作结束向同一组发送 StopMove。它不是物理急停。</p></div>
+        <label class="clearance"><input id="clearanceCheck" type="checkbox"><span>所有选中对象均有独立净空，地面水平防滑，人员已远离</span></label>
+        <label class="advanced-ack"><span>高风险解锁短语</span><input id="highRiskPhrase" type="text" autocomplete="off" placeholder="GO2 HIGH RISK"></label>
+      </section>
+
+      <section class="control-grid">
+        <article class="panel controls">
+          <div class="section-heading"><div><p class="section-label">快速控制</p><h2>已实机验收姿态</h2></div><span class="tag">长按 1.2 秒</span></div>
+          <div class="action-row quick-actions">
+            <button class="hold-button" data-posture="stand_up" disabled><span class="hold-fill"></span><span class="hold-copy"><b>起立</b><small>StandUp · 1004</small></span></button>
+            <button class="hold-button" data-posture="stand_down" disabled><span class="hold-fill"></span><span class="hold-copy"><b>趴下</b><small>StandDown · 1005</small></span></button>
+          </div>
+          <button id="stopButton" class="stop-button" disabled><span>STOP SELECTED</span><small>向全部选中对象发送高优先级 StopMove</small></button>
+        </article>
+
+        <article class="panel editor">
+          <div class="section-heading"><div><p class="section-label">编舞编辑器</p><h2>动作时间线</h2></div><span id="timelineTotal" class="tag">0 步 · 0 秒</span></div>
+          <p id="featuredDescription" class="editor-note">加载“流光摆尾”开始编辑；其中包含受限参数动作。</p>
+          <div class="editor-toolbar"><select id="editorAction" aria-label="选择动作"></select><label><span>等待</span><input id="editorDuration" type="number" min="0.5" max="8" step="0.5" value="3"></label><button id="addStep" class="button primary">加入</button></div>
+          <div class="custom-builder">
+            <div class="custom-builder-title"><b>自定义动作</b><small>仅开放保守范围，不接受 API ID</small></div>
+            <div class="custom-toolbar">
+              <select id="customKind" aria-label="自定义动作类型"><option value="euler">姿态微调</option><option value="wait">停顿</option></select>
+              <div id="customEulerFields" class="custom-fields"><label>R<input id="customRoll" type="number" min="-0.12" max="0.12" step="0.01" value="0.12"></label><label>P<input id="customPitch" type="number" min="-0.20" max="0.20" step="0.01" value="0"></label><label>Y<input id="customYaw" type="number" min="-0.30" max="0.30" step="0.01" value="0"></label></div>
+              <label class="custom-single">保持<input id="customDuration" type="number" min="0.5" max="8" step="0.5" value="1.5"></label>
+              <button id="addCustomStep" class="button ghost">加入自定义动作</button>
+            </div>
+          </div>
+          <ol id="timeline" class="timeline"></ol>
+          <div class="editor-actions"><button id="loadFeatured" class="button ghost">载入流光摆尾</button><button id="saveDraft" class="button ghost">保存草稿</button><button id="loadDraft" class="button ghost">读取草稿</button><button id="clearTimeline" class="button ghost">清空</button></div>
+          <button id="runChoreography" class="hold-button choreography-run" disabled><span class="hold-fill"></span><span class="hold-copy"><b>执行当前编舞</b><small>长按 1.2 秒 · 最多 12 步 / 40 秒</small></span></button>
+        </article>
+      </section>
+
+      <section class="panel library-section">
+        <div class="section-heading library-heading"><div><p class="section-label">完整动作库</p><h2>官方动作与模式</h2></div><div id="libraryFilters" class="filter-row" aria-label="动作分类"><button class="filter active" data-filter="all">全部</button><button class="filter" data-filter="posture">姿态</button><button class="filter" data-filter="gesture">手势</button><button class="filter" data-filter="dance">舞蹈</button><button class="filter" data-filter="gait">步态</button><button class="filter" data-filter="acrobatics">特技</button></div></div>
+        <div class="risk-legend"><span class="risk low">低</span><span class="risk medium">中</span><span class="risk high">高</span><span class="risk extreme">极高</span><small>未在本机验收的动作会明确标记；高/极高风险需要确认短语并长按 3 秒。</small></div>
+        <div id="actionLibrary" class="action-library"></div>
+      </section>
+
+      <section class="panel activity">
+        <div class="section-heading"><div><p class="section-label">操作记录</p><h2>本次会话</h2></div><button id="clearActivity" class="text-button">清空页面记录</button></div>
+        <ol id="activityList" aria-live="polite"><li><time>--:--:--</time><span>动作工作台已就绪。</span></li></ol>
+      </section>
+    </main>
+    <script src="/static/workbench.js" defer></script>
+  </body>
+</html>
