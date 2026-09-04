@@ -20,6 +20,25 @@ CUSTOM_MOTION_LIMITS: dict[str, dict[str, Any]] = {
         "api_id": None,
         "bounds": {},
     },
+    "velocity": {
+        "label": "摇杆移动",
+        "api_id": 1008,
+        "bounds": {
+            "linear": (0.05, 0.25),
+            "lateral": (0.05, 0.20),
+            "angular": (0.10, 0.50),
+            "duration": (0.50, 3.00),
+        },
+    },
+}
+
+VELOCITY_DIRECTIONS: dict[str, tuple[str, str, float]] = {
+    "forward": ("前进", "x", 1.0),
+    "backward": ("后退", "x", -1.0),
+    "left": ("左移", "y", 1.0),
+    "right": ("右移", "y", -1.0),
+    "counterclockwise": ("逆时针原地旋转", "z", 1.0),
+    "clockwise": ("顺时针原地旋转", "z", -1.0),
 }
 
 
@@ -71,6 +90,40 @@ def validate_custom_motion_step(
             ),
         }
 
+    if kind == "velocity":
+        allowed = {"kind", "direction", "speed", "duration"}
+        if set(raw_step) != allowed:
+            raise ValueError(f"第 {step_index} 步摇杆移动字段不完整或包含额外字段。")
+        direction = raw_step.get("direction")
+        if not isinstance(direction, str) or direction not in VELOCITY_DIRECTIONS:
+            raise ValueError(f"第 {step_index} 步摇杆移动方向无效。")
+        bounds = CUSTOM_MOTION_LIMITS[kind]["bounds"]
+        if direction in {"forward", "backward"}:
+            speed_bounds = bounds["linear"]
+        elif direction in {"left", "right"}:
+            speed_bounds = bounds["lateral"]
+        else:
+            speed_bounds = bounds["angular"]
+        duration_bounds = bounds["duration"]
+        _bounded_number(
+            raw_step.get("duration"),
+            field="持续时间",
+            low=duration_bounds[0],
+            high=duration_bounds[1],
+            step_index=step_index,
+        )
+        return {
+            "kind": kind,
+            "direction": direction,
+            "speed": _bounded_number(
+                raw_step.get("speed"),
+                field="速度",
+                low=speed_bounds[0],
+                high=speed_bounds[1],
+                step_index=step_index,
+            ),
+        }
+
     if set(raw_step) != {"kind", "duration"}:
         raise ValueError(f"第 {step_index} 步停顿包含不允许的字段。")
     return {"kind": "wait"}
@@ -90,11 +143,16 @@ def build_custom_motion_request(
             "y": normalized["pitch"],
             "z": normalized["yaw"],
         }
+    if kind == "velocity":
+        _, axis, sign = VELOCITY_DIRECTIONS[normalized["direction"]]
+        vector = {"x": 0.0, "y": 0.0, "z": 0.0}
+        vector[axis] = round(sign * normalized["speed"], 4)
+        return 1008, vector
     raise ValueError("Wait is local-only and does not produce a robot request.")
 
 
 def public_custom_motion_limits() -> dict[str, dict[str, Any]]:
-    return {
+    result = {
         kind: {
             "label": spec["label"],
             "bounds": {
@@ -103,3 +161,8 @@ def public_custom_motion_limits() -> dict[str, dict[str, Any]]:
         }
         for kind, spec in CUSTOM_MOTION_LIMITS.items()
     }
+    result["velocity"]["directions"] = {
+        direction: label
+        for direction, (label, _, _) in VELOCITY_DIRECTIONS.items()
+    }
+    return result

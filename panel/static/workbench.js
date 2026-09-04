@@ -1,5 +1,5 @@
 const token = document.querySelector('meta[name="go2-panel-token"]').content;
-const draftStorageKey = 'go2_choreography_v3';
+const draftStorageKey = 'go2_choreography_v4';
 const preferencesStorageKey = 'go2_panel_preferences_v1';
 const ui = Object.fromEntries([
   'connectionBadge', 'connectionTitle', 'connectionDetail',
@@ -8,6 +8,7 @@ const ui = Object.fromEntries([
   'libraryFilters', 'editorAction', 'editorDuration', 'addStep', 'timeline',
   'timelineTotal', 'loadFeatured', 'featuredDescription', 'saveDraft', 'loadDraft',
   'clearTimeline', 'runChoreography', 'customKind', 'customEulerFields',
+  'customVelocityFields', 'customDirection', 'customSpeed', 'customSpeedUnit',
   'customRoll', 'customPitch', 'customYaw',
   'customDuration', 'addCustomStep',
   'selectionSummary', 'selectionBoard', 'selectionMarquee', 'fleetRobots',
@@ -347,7 +348,7 @@ function updateControlLocks() {
   ui.runChoreography.title = !selectedReady
     ? '请先选择已在线的机器狗。'
     : controllerReady ? '' : '全部选中对象必须先起立。';
-  ui.stopButton.disabled = current.busy || !selectedReady;
+  ui.stopButton.disabled = !selectedReady;
 }
 
 function render(status) {
@@ -415,6 +416,11 @@ function timelineSeconds() { return timeline.reduce((sum, step) => sum + Number(
 
 function customStepLabel(step) {
   if (step.kind === 'euler') return `自定义姿态 · R ${Number(step.roll).toFixed(2)} / P ${Number(step.pitch).toFixed(2)} / Y ${Number(step.yaw).toFixed(2)}`;
+  if (step.kind === 'velocity') {
+    const labels = { forward: '前进', backward: '后退', left: '左移', right: '右移', clockwise: '顺时针原地旋转', counterclockwise: '逆时针原地旋转' };
+    const unit = ['clockwise', 'counterclockwise'].includes(step.direction) ? 'rad/s' : 'm/s';
+    return `摇杆移动 · ${labels[step.direction] || step.direction} ${Number(step.speed).toFixed(2)} ${unit}`;
+  }
   if (step.kind === 'wait') return '停顿';
   return step.kind || '未知自定义动作';
 }
@@ -591,8 +597,21 @@ function canAppendDuration(duration) {
 function updateCustomFields() {
   const kind = ui.customKind.value;
   ui.customEulerFields.hidden = kind !== 'euler';
+  ui.customVelocityFields.hidden = kind !== 'velocity';
+  ui.customDuration.max = kind === 'velocity' ? '3' : '8';
+  if (kind === 'velocity' && Number(ui.customDuration.value) > 3) ui.customDuration.value = '3';
 }
 ui.customKind.addEventListener('change', updateCustomFields);
+function updateVelocitySpeedBounds() {
+  const direction = ui.customDirection.value;
+  const rotating = ['clockwise', 'counterclockwise'].includes(direction);
+  const lateral = ['left', 'right'].includes(direction);
+  ui.customSpeed.min = rotating ? '0.10' : '0.05';
+  ui.customSpeed.max = rotating ? '0.50' : lateral ? '0.20' : '0.25';
+  ui.customSpeed.value = rotating ? '0.35' : lateral ? '0.12' : '0.15';
+  ui.customSpeedUnit.textContent = rotating ? 'rad/s' : 'm/s';
+}
+ui.customDirection.addEventListener('change', updateVelocitySpeedBounds);
 ui.addCustomStep.addEventListener('click', () => {
   const kind = ui.customKind.value;
   const duration = Number(ui.customDuration.value);
@@ -602,10 +621,20 @@ ui.addCustomStep.addEventListener('click', () => {
     const values = [Number(ui.customRoll.value), Number(ui.customPitch.value), Number(ui.customYaw.value)];
     if (!values.every(Number.isFinite) || values[0] < -0.12 || values[0] > 0.12 || values[1] < -0.20 || values[1] > 0.20 || values[2] < -0.30 || values[2] > 0.30) return log('姿态参数超出面板保守范围。', 'warning');
     step = { kind, roll: values[0], pitch: values[1], yaw: values[2], duration };
+  } else if (kind === 'velocity') {
+    const direction = ui.customDirection.value;
+    const speed = Number(ui.customSpeed.value);
+    const rotating = ['clockwise', 'counterclockwise'].includes(direction);
+    const lateral = ['left', 'right'].includes(direction);
+    const minimum = rotating ? 0.10 : 0.05;
+    const maximum = rotating ? 0.50 : lateral ? 0.20 : 0.25;
+    if (duration > 3) return log('摇杆移动单步最多持续 3 秒。', 'warning');
+    if (!Number.isFinite(speed) || speed < minimum || speed > maximum) return log('移动速度超出面板保守范围。', 'warning');
+    step = { kind, direction, speed, duration };
   }
   timeline.push(step); renderTimeline(); log(`已加入${customStepLabel(step)}。`, 'success');
 });
-updateCustomFields();
+updateVelocitySpeedBounds(); updateCustomFields();
 ui.loadFeatured.addEventListener('click', loadFeatured); ui.clearTimeline.addEventListener('click', () => { timeline = []; renderTimeline(); });
 ui.saveDraft.addEventListener('click', () => { localStorage.setItem(draftStorageKey, JSON.stringify(timeline)); log('编舞草稿已保存在本机浏览器。', 'success'); });
 ui.loadDraft.addEventListener('click', () => {

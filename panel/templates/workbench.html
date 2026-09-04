@@ -55,7 +55,7 @@
             <button class="hold-button" data-posture="stand_up" disabled><span class="hold-fill"></span><span class="hold-copy"><b>起立</b><small>StandUp · 1004</small></span></button>
             <button class="hold-button" data-posture="stand_down" disabled><span class="hold-fill"></span><span class="hold-copy"><b>趴下</b><small>StandDown · 1005</small></span></button>
           </div>
-          <button id="stopButton" class="stop-button" disabled><span>STOP SELECTED</span><small>向全部选中对象发送高优先级 StopMove</small></button>
+          <button id="stopButton" class="stop-button" disabled><span>STOP SELECTED</span><small>随时中止编舞并向全部选中对象发送高优先级 StopMove</small></button>
         </article>
 
         <article class="panel editor">
@@ -65,8 +65,9 @@
           <div class="custom-builder">
             <div class="custom-builder-title"><b>自定义动作</b><small>仅开放保守范围，不接受 API ID</small></div>
             <div class="custom-toolbar">
-              <select id="customKind" aria-label="自定义动作类型"><option value="euler">姿态微调</option><option value="wait">停顿</option></select>
+              <select id="customKind" aria-label="自定义动作类型"><option value="euler">姿态微调</option><option value="velocity">摇杆移动</option><option value="wait">停顿</option></select>
               <div id="customEulerFields" class="custom-fields"><label>R<input id="customRoll" type="number" min="-0.12" max="0.12" step="0.01" value="0.12"></label><label>P<input id="customPitch" type="number" min="-0.20" max="0.20" step="0.01" value="0"></label><label>Y<input id="customYaw" type="number" min="-0.30" max="0.30" step="0.01" value="0"></label></div>
+              <div id="customVelocityFields" class="velocity-fields" hidden><label>方向<select id="customDirection"><option value="forward">前进</option><option value="backward">后退</option><option value="left">左移</option><option value="right">右移</option><option value="clockwise">顺时针原地旋转</option><option value="counterclockwise">逆时针原地旋转</option></select></label><label>速度<input id="customSpeed" type="number" min="0.05" max="0.25" step="0.01" value="0.15"><small id="customSpeedUnit">m/s</small></label></div>
               <label class="custom-single">保持<input id="customDuration" type="number" min="0.5" max="8" step="0.5" value="1.5"></label>
               <button id="addCustomStep" class="button ghost">加入自定义动作</button>
             </div>

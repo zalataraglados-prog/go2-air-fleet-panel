@@ -18,7 +18,7 @@ The application manages up to 16 independent robots, provides RTS-style target s
 - Explicit backend action allowlist; the browser cannot submit arbitrary API IDs.
 - Separate action workbench and settings/connection center.
 - Local browser preferences for automatic connection, initial selection, polling interval, and compact cards.
-- A visual choreography editor limited to 12 steps and 40 seconds.
+- A visual choreography editor limited to 12 steps and 40 seconds, including bounded body-relative forward, backward, lateral, and in-place rotation steps.
 - `131` offline tests covering configuration, discovery, connection lifecycle, safety gates, protocol parsing, fleet behavior, and auto-connect retries.
 
 The current interface is localized in Simplified Chinese. Repository documentation, Git history, and release notes are maintained in English.
@@ -204,6 +204,10 @@ Exceptions are sanitized before they reach the browser or normal logs.
 - Completion and exceptional paths attempt `StopMove`, but physical power control remains the final safety mechanism.
 
 The built-in **Luminous Tail** choreography uses conservative, already accepted Euler primitives. It does not expose joint-level trajectories.
+
+Choreography locomotion uses the official high-level `Move(vx, vy, vyaw)` API. The editor exposes only six single-axis directions, caps forward/backward speed at `0.25 m/s`, lateral speed at `0.20 m/s`, yaw rate at `0.50 rad/s`, and each locomotion step at three seconds. A deadline-triggered `StopMove` is scheduled when the step starts, and **STOP SELECTED** remains available while a choreography is running.
+
+These locomotion steps are open-loop and relative to each robot's current body heading. They do not provide exact distance/angle control, shared-map localization, obstacle-aware navigation, or closed-loop formation keeping.
 
 ## Tests
 

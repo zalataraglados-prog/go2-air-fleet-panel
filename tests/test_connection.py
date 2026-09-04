@@ -405,6 +405,9 @@ async def test_only_allowlisted_action_requests_are_exposed(fake_sdk: Any) -> No
     euler = await connection.request_custom_motion(
         "euler", {"roll": 0.1, "pitch": 0.0, "yaw": -0.1}
     )
+    forward = await connection.request_custom_motion(
+        "velocity", {"direction": "forward", "speed": 0.15}
+    )
     with pytest.raises(ValueError):
         await connection.request_library_action("arbitrary_9999")
     with pytest.raises(ValueError):
@@ -447,4 +450,8 @@ async def test_only_allowlisted_action_requests_are_exposed(fake_sdk: Any) -> No
     assert euler == {
         "topic": "rt/api/sport/request",
         "options": {"api_id": 1007, "parameter": {"x": 0.1, "y": 0.0, "z": -0.1}},
+    }
+    assert forward == {
+        "topic": "rt/api/sport/request",
+        "options": {"api_id": 1008, "parameter": {"x": 0.15, "y": 0.0, "z": 0.0}},
     }

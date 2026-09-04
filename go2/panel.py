@@ -21,7 +21,11 @@ from .actions import (
 )
 from .config import AppConfig, PROJECT_ROOT
 from .connection import Go2Connection, Go2ConnectionError
-from .custom_motion import public_custom_motion_limits, validate_custom_motion_step
+from .custom_motion import (
+    VELOCITY_DIRECTIONS,
+    public_custom_motion_limits,
+    validate_custom_motion_step,
+)
 from .motion import MotionError
 from .protocol import (
     CommandOutcome,
@@ -226,6 +230,7 @@ class RobotPanelSession:
         self._motion_mode_checked_at: str | None = None
         self._operation: str | None = None
         self._operation_guard = threading.Lock()
+        self._stop_generation = 0
         self._closed = False
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
@@ -1136,6 +1141,7 @@ class RobotPanelSession:
         robot_ids: list[str],
     ) -> dict[str, Any]:
         pairs = self._selected_runtime_pairs(robot_ids)
+        stop_generation = self._stop_generation
         preflight = await self._collect_snapshot_map(pairs)
         for profile, _ in pairs:
             try:
@@ -1150,6 +1156,8 @@ class RobotPanelSession:
         warnings: list[str] = []
         try:
             for index, step in enumerate(steps, start=1):
+                if self._stop_generation != stop_generation:
+                    raise MotionError("编舞已由 STOP SELECTED 中止。")
                 step_started = time.monotonic()
                 command_result: dict[str, Any] | None = None
                 if "action" in step:
@@ -1197,7 +1205,11 @@ class RobotPanelSession:
                     )
                 else:
                     kind = step["kind"]
-                    label = "自定义姿态"
+                    label = (
+                        VELOCITY_DIRECTIONS[step["direction"]][0]
+                        if kind == "velocity"
+                        else "自定义姿态"
+                    )
                     result_id = f"custom:{kind}"
                     parameters = {
                         key: value
@@ -1213,21 +1225,39 @@ class RobotPanelSession:
                         f"编舞 {index}/{len(steps)} · {label} · "
                         f"{len(pairs)} 个对象"
                     )
-                    command_result = await self._selected_checked_command(
-                        pairs,
-                        f"第 {index} 步 {label}",
-                        lambda connection: connection.request_custom_motion(
-                            kind,
-                            parameters,
-                        ),
-                        timeout=4.0,
-                        result_id=result_id,
-                    )
+                    deadline_stop: asyncio.Task[
+                        tuple[dict[str, int | None], list[str]]
+                    ] | None = None
+                    if kind == "velocity":
+                        async def stop_at_deadline() -> tuple[
+                            dict[str, int | None], list[str]
+                        ]:
+                            await asyncio.sleep(step["duration"])
+                            return await self._selected_best_effort_stop(pairs)
+
+                        deadline_stop = asyncio.create_task(stop_at_deadline())
+                    try:
+                        command_result = await self._selected_checked_command(
+                            pairs,
+                            f"第 {index} 步 {label}",
+                            lambda connection: connection.request_custom_motion(
+                                kind,
+                                parameters,
+                            ),
+                            timeout=4.0,
+                            result_id=result_id,
+                        )
+                    except BaseException:
+                        if deadline_stop is not None:
+                            deadline_stop.cancel()
+                            await asyncio.gather(deadline_stop, return_exceptions=True)
+                        raise
                     effects: dict[str, bool | None] = {
                         profile.id: None for profile, _ in pairs
                     }
                     observed_rpy: dict[str, list[float]] = {}
                     delta_rpy: dict[str, list[float]] = {}
+                    velocity_stop_codes: dict[str, int | None] = {}
                     if kind == "euler":
                         observation_delay = min(
                             0.8,
@@ -1273,6 +1303,20 @@ class RobotPanelSession:
                                     tuple(observed_rpy[profile.id]),
                                     effects[profile.id],
                                 )
+                    elif deadline_stop is not None:
+                        velocity_stop_codes, stop_warnings = await deadline_stop
+                        warnings.extend(stop_warnings)
+                        unconfirmed = [
+                            profile.label
+                            for profile, _ in pairs
+                            if velocity_stop_codes.get(profile.id) != 0
+                        ]
+                        if unconfirmed:
+                            raise MotionError(
+                                f"第 {index} 步 {label} 已到时，但"
+                                f"{'、'.join(unconfirmed)} 未明确确认 StopMove；"
+                                "已中止后续步骤并再次尝试 StopMove。"
+                            )
                     completed.append(
                         {
                             "kind": kind,
@@ -1283,6 +1327,7 @@ class RobotPanelSession:
                             "effect_observed": effects,
                             "observed_rpy": observed_rpy,
                             "delta_rpy": delta_rpy,
+                            "stop_status": velocity_stop_codes,
                             "start_skew_ms": command_result["start_skew_ms"],
                         }
                     )
@@ -1305,6 +1350,8 @@ class RobotPanelSession:
                     warnings.append(
                         f"第 {index} 步至少有一个对象已应答，但无显式状态码。"
                     )
+                if self._stop_generation != stop_generation:
+                    raise MotionError("编舞已由 STOP SELECTED 中止。")
                 elapsed = time.monotonic() - step_started
                 delay = remaining_step_delay(step["duration"], elapsed)
                 LOGGER.info(
@@ -1317,6 +1364,8 @@ class RobotPanelSession:
                     ",".join(robot_ids),
                 )
                 await asyncio.sleep(delay)
+                if self._stop_generation != stop_generation:
+                    raise MotionError("编舞已由 STOP SELECTED 中止。")
         finally:
             stop_codes, stop_warnings = await self._selected_best_effort_stop(pairs)
             warnings.extend(stop_warnings)
@@ -1342,10 +1391,8 @@ class RobotPanelSession:
             robot_ids,
             tuple(profile.id for profile in self._robot_profiles),
         )
-        return self._run_exclusive(
-            f"StopMove · {len(selected)} 个对象",
-            lambda: self._stop_move(selected),
-        )
+        self._stop_generation += 1
+        return self._submit(self._stop_move(selected))
 
     async def _stop_move(self, robot_ids: list[str]) -> dict[str, Any]:
         pairs = self._selected_runtime_pairs(robot_ids)

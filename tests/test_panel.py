@@ -519,6 +519,7 @@ def test_choreography_accepts_bounded_custom_primitives(panel: Any) -> None:
     client, session, token = panel
     steps = [
         {"kind": "euler", "roll": 0.1, "pitch": 0, "yaw": -0.08, "duration": 1.5},
+        {"kind": "velocity", "direction": "clockwise", "speed": 0.35, "duration": 2},
         {"kind": "wait", "duration": 1},
     ]
     response = client.post(
@@ -527,7 +528,7 @@ def test_choreography_accepts_bounded_custom_primitives(panel: Any) -> None:
         json={"confirm_clearance": True, "steps": steps, "robot_ids": ["dog_2"]},
     )
     assert response.status_code == 200
-    assert session.calls == ["choreography:2:dog_2"]
+    assert session.calls == ["choreography:3:dog_2"]
 
 
 @pytest.mark.parametrize(
@@ -537,6 +538,8 @@ def test_choreography_accepts_bounded_custom_primitives(panel: Any) -> None:
         {"kind": "body_height", "height": -0.04, "duration": 1},
         {"kind": "euler", "roll": 0, "pitch": 0, "yaw": 0, "api_id": 1007, "duration": 1},
         {"kind": "wait", "api_id": 1003, "duration": 1},
+        {"kind": "velocity", "direction": "forward", "speed": 0.3, "duration": 1},
+        {"kind": "velocity", "direction": "clockwise", "speed": 0.3, "duration": 3.5},
     ],
 )
 def test_choreography_rejects_unsafe_custom_parameters_or_api_injection(
