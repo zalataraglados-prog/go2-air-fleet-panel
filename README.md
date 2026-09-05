@@ -9,17 +9,18 @@ The application manages up to 16 independent robots, provides RTS-style target s
 ## Highlights
 
 - Local STA and local AP WebRTC connectivity through `unitree_webrtc_connect`.
-- Serial-number discovery across all active IPv4 interfaces.
-- Automatic recovery after Wi-Fi changes; cached addresses are optional and stale addresses are replaced by live discovery results.
-- Startup auto-connect with bounded retries and no motion commands.
-- Partial fleet tolerance: an offline robot does not tear down healthy sessions.
-- RTS-style single, additive, select-all, clear, and drag-box selection.
+- Serial-number discovery and WebRTC ICE host candidates are constrained to the primary physical private-LAN subnet; VPN, overlay, host-only, link-local, and unrelated subnets are excluded.
+- Automatic recovery after Wi-Fi changes; cached addresses are optional, live discovery takes precedence, and cross-subnet or `169.254.*` caches are rejected.
+- Startup auto-connect with bounded exponential backoff and no motion commands.
+- Partial fleet tolerance: an offline robot does not tear down healthy sessions or block explicitly selected online robots.
+- RTS-style single, additive, select-all, clear, and drag-box selection, with no robot selected by default.
 - Per-robot read-only state, motion-mode detection, response classification, and timing.
 - Explicit backend action allowlist; the browser cannot submit arbitrary API IDs.
+- DataChannel-only WebRTC sessions omit unused audio/video RTP transceivers, reducing each robot to one ICE transport and a smaller UDP footprint.
 - Separate action workbench and settings/connection center.
-- Local browser preferences for automatic connection, initial selection, polling interval, and compact cards.
+- Local browser preferences for automatic connection, polling interval, and compact cards.
 - A visual choreography editor limited to 12 steps and 40 seconds, including bounded body-relative forward, backward, lateral, and in-place rotation steps.
-- `131` offline tests covering configuration, discovery, connection lifecycle, safety gates, protocol parsing, fleet behavior, and auto-connect retries.
+- `163` offline tests covering configuration, discovery, connection lifecycle, safety gates, protocol parsing, fleet behavior, and auto-connect retries.
 
 The current interface is localized in Simplified Chinese. Repository documentation, Git history, and release notes are maintained in English.
 
@@ -94,7 +95,7 @@ UNITREE_ROBOT_2_AES_128_KEY=<32-hex-character-device-key>
 
 Continue with `UNITREE_ROBOT_3_...` through `UNITREE_ROBOT_16_...` as needed.
 
-Leave all `*_IP` values blank for network-independent operation. On every Local STA connection, the panel discovers each robot by serial number across all active IPv4 interfaces. If an optional cached address exists, a live discovery result takes precedence; the cache is only used when multicast discovery is unavailable.
+Leave all `*_IP` values blank for network-independent operation. On every Local STA connection, the panel discovers each robot by serial number on the primary physical private-LAN subnet. VPN, overlay, host-only, link-local, and unrelated subnets are excluded. If an optional cached address exists, a live discovery result takes precedence; the cache is used only when multicast discovery is unavailable and the address remains on the current `/24` LAN.
 
 For Local AP mode, connect the PC directly to the robot hotspot and set `connection.mode` to `local_ap`. The robot address is fixed at `192.168.12.1`.
 
@@ -123,7 +124,7 @@ The normal workflow after changing routers is:
 1. Join the PC and every robot to the new LAN.
 2. Start the panel from the desktop shortcut or run `python scripts/panel.py`.
 3. The panel enumerates active IPv4 interfaces, discovers each configured serial number, and connects the fleet automatically.
-4. Partial failures are retried while healthy sessions remain connected.
+4. Partial failures are retried with a bounded 10, 20, 40, then 60-second backoff while healthy sessions remain connected.
 
 No `.env` edit is required. Discovery and auto-connect do not send movement commands.
 
@@ -140,7 +141,9 @@ Open:
 - Workbench: <http://127.0.0.1:8765/>
 - Settings and connection center: <http://127.0.0.1:8765/settings>
 
-The server binds only to `127.0.0.1`. Starting the service launches a bounded background connection pass, while either browser page can retry any remaining offline devices.
+The server binds only to `127.0.0.1`. Starting the service launches a bounded background connection pass, while either browser page can retry any remaining offline devices with exponential backoff.
+
+Runtime diagnostics are written as UTF-8 to `logs/panel.log`. The file rotates at 5 MiB and retains five backups. It records per-robot discovery targets, sanitized failure categories, ICE/DataChannel transitions, connection retry intervals, operation timing, and matched response latency; device keys and raw transport frames are excluded.
 
 On Windows, `scripts/start_panel.ps1` reuses an existing service or starts it in the background and opens the browser. A desktop shortcut can target:
 
@@ -205,9 +208,9 @@ Exceptions are sanitized before they reach the browser or normal logs.
 
 The built-in **Luminous Tail** choreography uses conservative, already accepted Euler primitives. It does not expose joint-level trajectories.
 
-Choreography locomotion uses the official high-level `Move(vx, vy, vyaw)` API. The editor exposes only six single-axis directions, caps forward/backward speed at `0.25 m/s`, lateral speed at `0.20 m/s`, yaw rate at `0.50 rad/s`, and each locomotion step at three seconds. A deadline-triggered `StopMove` is scheduled when the step starts, and **STOP SELECTED** remains available while a choreography is running.
+Choreography locomotion streams the official high-level `Move(vx, vy, vyaw)` RPC at 8 Hz so firmware command expiry cannot turn a held direction into a short nudge. The editor exposes only six single-axis directions, caps forward/backward speed at `0.25 m/s`, lateral speed at `0.30 m/s`, yaw rate at `0.50 rad/s`, and each locomotion step at three seconds. Consecutive velocity steps switch directly and issue one `StopMove` only at the end of the contiguous chain. Transitions to non-velocity steps also stop first, and **STOP SELECTED** remains available while a choreography is running. The checked first-frame acknowledgement allows 1.2 seconds for multi-robot response jitter without pausing the 8 Hz stream.
 
-These locomotion steps are open-loop and relative to each robot's current body heading. They do not provide exact distance/angle control, shared-map localization, obstacle-aware navigation, or closed-loop formation keeping.
+These locomotion steps are open-loop and relative to each robot's current body heading. Duration does not guarantee an exact distance or angle. They do not provide shared-map localization, obstacle-aware navigation, or closed-loop formation keeping.
 
 ## Tests
 

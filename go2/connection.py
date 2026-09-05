@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import Enum
+import ipaddress
+import json
 import logging
+import time
 from typing import Any, Callable, Mapping
 
 from .actions import ACTION_LIBRARY
 from .custom_motion import build_custom_motion_request
 from .config import ConnectionConfig
-from .discovery import discover_robot_ip
+from .discovery import discover_robot_ip, local_ipv4_candidates
 
 
 LOGGER = logging.getLogger(__name__)
@@ -22,6 +25,74 @@ _READ_ONLY_STATE_TOPICS = frozenset(
         "rt/lf/sportmodestate",
     }
 )
+
+
+def cached_ip_matches_lan(cached_ip: str | None, local_interfaces: str) -> bool:
+    """Accept cached robot addresses only on a discovered physical /24 LAN."""
+
+    if not cached_ip:
+        return False
+    try:
+        cached = ipaddress.ip_address(cached_ip)
+    except ValueError:
+        return False
+    if (
+        cached.version != 4
+        or not cached.is_private
+        or cached.is_link_local
+        or cached.is_loopback
+    ):
+        return False
+    for value in local_interfaces.split(","):
+        value = value.strip()
+        try:
+            local = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if local.version != 4 or local.is_link_local or local.is_loopback:
+            continue
+        if cached in ipaddress.ip_network(f"{local}/24", strict=False):
+            return True
+    return False
+
+
+def constrain_ice_host_candidates(addresses: tuple[str, ...]) -> tuple[str, ...]:
+    """Limit aioice host candidates to the active private IPv4 LAN."""
+
+    validated: list[str] = []
+    for value in addresses:
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if (
+            address.version == 4
+            and address.is_private
+            and not address.is_link_local
+            and not address.is_loopback
+            and value not in validated
+        ):
+            validated.append(value)
+    if not validated:
+        raise Go2ConnectionError(
+            FailureKind.ROBOT_NOT_FOUND,
+            detail="No usable physical private-LAN address is available for ICE.",
+        )
+
+    try:
+        import aioice.ice as aioice_ice
+    except ImportError as exc:
+        raise Go2ConnectionError(FailureKind.DEPENDENCY_MISSING) from exc
+
+    selected = tuple(validated)
+
+    def selected_host_addresses(use_ipv4: bool, use_ipv6: bool) -> list[str]:
+        del use_ipv6
+        return list(selected) if use_ipv4 else []
+
+    aioice_ice.get_host_addresses = selected_host_addresses
+    LOGGER.info("ICE host candidates constrained: addresses=%s", ",".join(selected))
+    return selected
 
 
 class FailureKind(str, Enum):
@@ -93,6 +164,20 @@ class _Sdk:
     data_channel_timeout_error: type[BaseException]
 
 
+class _DisabledMediaChannel:
+    """Placeholder that prevents unused audio/video RTP transceivers."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+
+
+def _configure_datachannel_only_driver(driver_module: Any) -> None:
+    """Keep the control panel on one SCTP/ICE transport per robot."""
+
+    driver_module.WebRTCAudioChannel = _DisabledMediaChannel
+    driver_module.WebRTCVideoChannel = _DisabledMediaChannel
+
+
 def _load_sdk() -> _Sdk:
     try:
         from unitree_webrtc_connect import (
@@ -105,11 +190,13 @@ def _load_sdk() -> _Sdk:
             UnitreeWebRTCConnection,
             WebRTCConnectionMethod,
         )
+        from unitree_webrtc_connect import webrtc_driver
     except ImportError as exc:
         raise Go2ConnectionError(
             FailureKind.DEPENDENCY_MISSING,
             detail="请在项目虚拟环境中执行 pip install -r requirements.txt。",
         ) from exc
+    _configure_datachannel_only_driver(webrtc_driver)
     return _Sdk(
         connection_class=UnitreeWebRTCConnection,
         method_enum=WebRTCConnectionMethod,
@@ -146,6 +233,7 @@ class Go2Connection:
         self._discovery_function = discovery_function or discover_robot_ip
         self._connection: Any | None = None
         self._resolved_ip: str | None = None
+        self._request_id = int(time.time() * 1000) % 2_147_483_648
         self._lock = asyncio.Lock()
 
     @property
@@ -302,6 +390,28 @@ class Go2Connection:
             {"api_id": api_id, "parameter": parameter},
         )
 
+    def publish_velocity_keepalive(self, direction: str, speed: float) -> None:
+        """Refresh a validated Move command without creating an ack waiter."""
+
+        api_id, parameter = build_custom_motion_request(
+            "velocity",
+            {"direction": direction, "speed": speed},
+        )
+        self._request_id = (self._request_id + 1) % 2_147_483_648
+        self._validated_pub_sub().publish_without_callback(
+            "rt/api/sport/request",
+            {
+                "header": {
+                    "identity": {
+                        "id": self._request_id,
+                        "api_id": api_id,
+                    }
+                },
+                "parameter": json.dumps(parameter),
+            },
+            "req",
+        )
+
     def _build_connection(self, sdk: _Sdk) -> Any:
         method = (
             sdk.method_enum.LocalAP
@@ -324,6 +434,7 @@ class Go2Connection:
             if self.is_connected and self.data_channel_ready:
                 return
             self._preflight()
+            ice_interfaces: tuple[str, ...] = ()
             if (
                 self.settings.mode == "local_sta"
                 and self.settings.serial_number
@@ -332,10 +443,28 @@ class Go2Connection:
                 resolved_ip, local_ip = await asyncio.to_thread(
                     self._discovery_function, self.settings.serial_number
                 )
-                if not resolved_ip and not self.settings.ip:
+                ice_interfaces = tuple(
+                    value.strip()
+                    for value in local_ip.split(",")
+                    if value.strip()
+                )
+                cached_ip_usable = cached_ip_matches_lan(
+                    self.settings.ip,
+                    local_ip,
+                )
+                if not resolved_ip and not cached_ip_usable:
+                    cached_detail = (
+                        " Cached address rejected because it is not on the "
+                        "current physical LAN."
+                        if self.settings.ip
+                        else ""
+                    )
                     raise Go2ConnectionError(
                         FailureKind.ROBOT_NOT_FOUND,
-                        detail=f"No targeted multicast reply on local interface {local_ip}.",
+                        detail=(
+                            f"No targeted multicast reply on local interface {local_ip}."
+                            f"{cached_detail}"
+                        ),
                     )
                 if resolved_ip:
                     self._resolved_ip = resolved_ip
@@ -346,9 +475,13 @@ class Go2Connection:
                     )
                 else:
                     LOGGER.warning(
-                        "Targeted discovery did not reply; using cached ip=%s",
+                        "Targeted discovery did not reply; using same-LAN cached ip=%s",
                         self.settings.ip,
                     )
+            if self.settings.mode == "local_sta":
+                constrain_ice_host_candidates(
+                    ice_interfaces or local_ipv4_candidates()
+                )
             sdk = _load_sdk()
             self._connection = self._build_connection(sdk)
             LOGGER.info(
@@ -373,7 +506,16 @@ class Go2Connection:
                         detail="The application-level validation did not complete.",
                         state=self.transport_state,
                     )
-                LOGGER.info("GO2 Air WebRTC and DataChannel are ready")
+                state = self.transport_state
+                LOGGER.info(
+                    "GO2 Air WebRTC and DataChannel are ready: ip=%s "
+                    "peer=%s ice=%s data_channel=%s validated=%s",
+                    self.effective_target_ip or "discovery",
+                    state.peer,
+                    state.ice,
+                    state.data_channel,
+                    state.data_channel_validated,
+                )
             except asyncio.CancelledError:
                 await self._disconnect_unlocked()
                 raise
@@ -385,18 +527,49 @@ class Go2Connection:
                     else FailureKind.TIMEOUT
                 )
                 await self._disconnect_unlocked()
+                LOGGER.warning(
+                    "GO2 Air connection timeout: ip=%s kind=%s peer=%s "
+                    "ice=%s data_channel=%s validated=%s",
+                    self.effective_target_ip or "discovery",
+                    kind.value,
+                    state.peer,
+                    state.ice,
+                    state.data_channel,
+                    state.data_channel_validated,
+                )
                 raise Go2ConnectionError(
                     kind,
                     detail=f"timeout={self.settings.connect_timeout:.1f}s",
                     state=state,
                 ) from exc
-            except Go2ConnectionError:
+            except Go2ConnectionError as exc:
+                state = exc.state or self.transport_state
                 await self._disconnect_unlocked()
+                LOGGER.warning(
+                    "GO2 Air connection failed: ip=%s kind=%s peer=%s "
+                    "ice=%s data_channel=%s validated=%s",
+                    self.effective_target_ip or "discovery",
+                    exc.kind.value,
+                    state.peer,
+                    state.ice,
+                    state.data_channel,
+                    state.data_channel_validated,
+                )
                 raise
             except Exception as exc:
                 state = self.transport_state
                 kind = self._classify_exception(exc, sdk, state)
                 await self._disconnect_unlocked()
+                LOGGER.warning(
+                    "GO2 Air connection failed: ip=%s kind=%s peer=%s "
+                    "ice=%s data_channel=%s validated=%s",
+                    self.effective_target_ip or "discovery",
+                    kind.value,
+                    state.peer,
+                    state.ice,
+                    state.data_channel,
+                    state.data_channel_validated,
+                )
                 sanitized = Go2ConnectionError(kind, state=state)
                 if kind is FailureKind.AES_KEY_REJECTED:
                     # The upstream exception includes a key prefix. Suppress its
@@ -433,9 +606,18 @@ class Go2Connection:
         return FailureKind.UNKNOWN
 
     async def _disconnect_unlocked(self) -> None:
-        connection, self._connection = self._connection, None
+        connection = self._connection
         if connection is None:
             return
+        state = self.transport_state
+        self._connection = None
+        LOGGER.info(
+            "Disconnecting GO2 Air WebRTC: ip=%s peer=%s ice=%s data_channel=%s",
+            self.effective_target_ip or "discovery",
+            state.peer,
+            state.ice,
+            state.data_channel,
+        )
         try:
             await asyncio.wait_for(connection.disconnect(), timeout=5.0)
         except Exception:

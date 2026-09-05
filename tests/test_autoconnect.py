@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from go2.autoconnect import auto_connect_until_ready
+from go2.autoconnect import auto_connect_until_ready, retry_delay_seconds
 
 
 class FakeSession:
@@ -61,12 +61,41 @@ def test_auto_connect_honors_shutdown_before_first_attempt() -> None:
     assert session.calls == 0
 
 
+def test_auto_connect_uses_bounded_exponential_backoff() -> None:
+    class RecordingStopEvent:
+        def __init__(self) -> None:
+            self.waits: list[float] = []
+
+        def wait(self, delay: float) -> bool:
+            self.waits.append(delay)
+            return False
+
+        def is_set(self) -> bool:
+            return False
+
+    session = FakeSession([0, 1, 2])
+    stop_event = RecordingStopEvent()
+
+    assert auto_connect_until_ready(
+        session,
+        stop_event,  # type: ignore[arg-type]
+        retry_seconds=5,
+        max_retry_seconds=8,
+        max_attempts=3,
+    )
+    assert stop_event.waits == [5, 8]
+    assert retry_delay_seconds(10, 1, 60) == 10
+    assert retry_delay_seconds(10, 2, 60) == 20
+    assert retry_delay_seconds(10, 4, 60) == 60
+
+
 @pytest.mark.parametrize(
-    ("retry_seconds", "max_attempts"),
-    [(-1, 1), (0, 0)],
+    ("retry_seconds", "max_retry_seconds", "max_attempts"),
+    [(-1, 60, 1), (10, 5, 1), (0, 60, 0)],
 )
 def test_auto_connect_rejects_invalid_bounds(
     retry_seconds: float,
+    max_retry_seconds: float,
     max_attempts: int,
 ) -> None:
     with pytest.raises(ValueError):
@@ -74,5 +103,6 @@ def test_auto_connect_rejects_invalid_bounds(
             FakeSession([2]),
             threading.Event(),
             retry_seconds=retry_seconds,
+            max_retry_seconds=max_retry_seconds,
             max_attempts=max_attempts,
         )

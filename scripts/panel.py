@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import sys
 import threading
@@ -17,6 +18,10 @@ if str(ROOT) not in sys.path:
 from go2.config import ConfigurationError, load_config  # noqa: E402
 from go2.autoconnect import auto_connect_until_ready  # noqa: E402
 from go2.panel import RobotPanelSession, create_panel_app  # noqa: E402
+
+
+LOGGER = logging.getLogger(__name__)
+DEFAULT_LOG_PATH = ROOT / "logs" / "panel.log"
 
 
 class _RawTransportFrameFilter(logging.Filter):
@@ -33,6 +38,34 @@ class _RawTransportFrameFilter(logging.Filter):
             record.name == "root"
             and any(record.getMessage().startswith(prefix) for prefix in self._PREFIXES)
         )
+
+
+def configure_logging(level: str, log_path: Path = DEFAULT_LOG_PATH) -> Path:
+    """Configure UTF-8 console and bounded persistent diagnostics."""
+
+    resolved = log_path.resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s [%(threadName)s]: %(message)s"
+    )
+    console = logging.StreamHandler()
+    rotating = RotatingFileHandler(
+        resolved,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+        delay=True,
+    )
+    frame_filter = _RawTransportFrameFilter()
+    for handler in (console, rotating):
+        handler.setFormatter(formatter)
+        handler.addFilter(frame_filter)
+    logging.basicConfig(
+        level=getattr(logging, level),
+        handlers=[console, rotating],
+        force=True,
+    )
+    return resolved
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,20 +88,20 @@ def main() -> int:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    logging.basicConfig(
-        level=getattr(logging, config.logging.level),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    for handler in logging.getLogger().handlers:
-        handler.addFilter(_RawTransportFrameFilter())
+    log_path = configure_logging(config.logging.level)
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    LOGGER.info("GO2 panel starting: log_file=%s", log_path)
     session = RobotPanelSession(config)
     app = create_panel_app(config, session=session)
     auto_connect_stop = threading.Event()
     auto_connect_thread = threading.Thread(
         target=auto_connect_until_ready,
         args=(session, auto_connect_stop),
-        kwargs={"retry_seconds": 10.0, "max_attempts": 12},
+        kwargs={
+            "retry_seconds": 10.0,
+            "max_retry_seconds": 60.0,
+            "max_attempts": 12,
+        },
         name="go2-panel-auto-connect",
         daemon=True,
     )

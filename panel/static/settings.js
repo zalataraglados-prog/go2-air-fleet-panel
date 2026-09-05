@@ -2,7 +2,6 @@ const token = document.querySelector('meta[name="go2-panel-token"]').content;
 const preferencesStorageKey = 'go2_panel_preferences_v1';
 const defaultPreferences = {
   autoConnect: true,
-  initialSelection: 'all',
   pollIntervalMs: 2000,
   compactCards: false,
 };
@@ -11,7 +10,7 @@ const ui = Object.fromEntries([
   'settingsConnectionBadge', 'settingsConnectionTitle',
   'settingsConnectionDetail', 'settingsFleetCount', 'settingsRobotGrid',
   'settingsConnectButton', 'settingsRefreshButton',
-  'settingsDisconnectButton', 'preferencesForm', 'initialSelection',
+  'settingsDisconnectButton', 'preferencesForm',
   'pollIntervalMs', 'autoConnect', 'compactCards', 'resetPreferencesButton',
   'settingsActivityList', 'clearSettingsActivity',
 ].map((id) => [id, document.querySelector(`#${id}`)]));
@@ -19,6 +18,9 @@ const ui = Object.fromEntries([
 let current = { busy: false, fleet: { robots: [], configured_count: 0, connected_count: 0 } };
 let autoConnectInFlight = false;
 let nextAutoConnectAt = 0;
+const autoConnectMinimumDelayMs = 10000;
+const autoConnectMaximumDelayMs = 60000;
+let autoConnectDelayMs = autoConnectMinimumDelayMs;
 
 function now() {
   return new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -136,9 +138,6 @@ function loadPreferences() {
   try {
     const saved = JSON.parse(localStorage.getItem(preferencesStorageKey) || '{}');
     ui.autoConnect.checked = saved.autoConnect !== false;
-    ui.initialSelection.value = ['all', 'online', 'none'].includes(saved.initialSelection)
-      ? saved.initialSelection
-      : defaultPreferences.initialSelection;
     ui.pollIntervalMs.value = [1000, 2000, 5000].includes(Number(saved.pollIntervalMs))
       ? String(saved.pollIntervalMs)
       : String(defaultPreferences.pollIntervalMs);
@@ -150,7 +149,6 @@ function loadPreferences() {
 
 function setPreferenceFields(preferences) {
   ui.autoConnect.checked = preferences.autoConnect;
-  ui.initialSelection.value = preferences.initialSelection;
   ui.pollIntervalMs.value = String(preferences.pollIntervalMs);
   ui.compactCards.checked = preferences.compactCards;
 }
@@ -170,7 +168,6 @@ ui.settingsDisconnectButton.addEventListener('click', () => {
 function currentPreferences() {
   return {
     autoConnect: ui.autoConnect.checked,
-    initialSelection: ui.initialSelection.value,
     pollIntervalMs: Number(ui.pollIntervalMs.value),
     compactCards: ui.compactCards.checked,
   };
@@ -212,11 +209,29 @@ async function maybeAutoConnect() {
     fleet.connected || !fleet.ready_to_connect || Date.now() < nextAutoConnectAt
   ) return;
   autoConnectInFlight = true;
-  nextAutoConnectAt = Date.now() + 10000;
+  let fleetReady = false;
   try {
-    await perform('自动发现并连接设备', '/api/fleet/connect');
+    const result = await api('/api/fleet/connect', { method: 'POST', body: {} });
+    render(result);
+    fleetReady = result.fleet?.connected === true;
+    if (result.warning) log(result.warning, 'warning');
+    else log('全部设备已自动连接。', 'success');
+  } catch (error) {
+    log(`自动连接暂未完成：${error.message}`, 'warning');
   } finally {
     autoConnectInFlight = false;
+    try { render(await api('/api/status')); } catch { render({ busy: false }); }
+    if (fleetReady) {
+      autoConnectDelayMs = autoConnectMinimumDelayMs;
+    } else {
+      const retryDelayMs = autoConnectDelayMs;
+      nextAutoConnectAt = Date.now() + retryDelayMs;
+      autoConnectDelayMs = Math.min(
+        autoConnectDelayMs * 2,
+        autoConnectMaximumDelayMs,
+      );
+      log(`自动补连将在 ${retryDelayMs / 1000} 秒后重试。`, 'warning');
+    }
   }
 }
 

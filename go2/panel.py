@@ -43,6 +43,9 @@ from .state import Go2StateReader, StateError, StateSnapshot
 
 MAX_CHOREOGRAPHY_STEPS = 12
 MAX_CHOREOGRAPHY_SECONDS = 40.0
+VELOCITY_STREAM_HZ = 8
+VELOCITY_PERIOD_SECONDS = 1.0 / VELOCITY_STREAM_HZ
+VELOCITY_ACK_TIMEOUT_SECONDS = 1.2
 LOGGER = logging.getLogger(__name__)
 
 
@@ -91,6 +94,10 @@ class PanelBusyError(RuntimeError):
 
 class PanelNotConnectedError(RuntimeError):
     """Raised when an operation requires an active robot connection."""
+
+
+class CommandResponseTimeout(MotionError):
+    """Raised when a sent command has no matching acknowledgement in time."""
 
 
 def validate_robot_ids(value: Any, configured_ids: tuple[str, ...]) -> list[str]:
@@ -161,6 +168,7 @@ def _snapshot_payload(snapshot: StateSnapshot | None) -> dict[str, Any] | None:
         "error_code": sport.error_code,
         "mode": sport.mode,
         "gait_type": sport.gait_type,
+        "position": [round(value, 4) for value in sport.position],
         "velocity": [round(value, 4) for value in sport.velocity],
         "yaw_speed": round(sport.yaw_speed, 4),
     }
@@ -221,6 +229,7 @@ class RobotPanelSession:
         self._fleet_snapshots: dict[str, StateSnapshot] = {}
         self._fleet_motion_modes: dict[str, str] = {}
         self._fleet_connect_errors: dict[str, dict[str, str]] = {}
+        self._fleet_transport_fingerprints: dict[str, tuple[Any, ...]] = {}
         self._last_snapshot: StateSnapshot | None = None
         self._action_results: dict[str, dict[str, Any]] = {}
         self._response_times_ms: dict[str, int] = {}
@@ -273,8 +282,24 @@ class RobotPanelSession:
         if not self._operation_guard.acquire(blocking=False):
             raise PanelBusyError(f"当前正在执行：{self._operation or '其他操作'}")
         self._operation = name
+        started = time.monotonic()
+        LOGGER.info("Panel operation started: operation=%s", name)
         try:
-            return self._submit(operation())
+            result = self._submit(operation())
+            LOGGER.info(
+                "Panel operation completed: operation=%s elapsed_ms=%d",
+                name,
+                round((time.monotonic() - started) * 1000),
+            )
+            return result
+        except Exception as exc:
+            LOGGER.warning(
+                "Panel operation failed: operation=%s kind=%s elapsed_ms=%d",
+                name,
+                type(exc).__name__,
+                round((time.monotonic() - started) * 1000),
+            )
+            raise
         finally:
             self._operation = None
             self._operation_guard.release()
@@ -335,6 +360,37 @@ class RobotPanelSession:
                 missing.append("SN")
             if profile.connection.require_aes_key and not profile.connection.aes_128_key:
                 missing.append("AES key")
+            connected_now = bool(
+                connection
+                and connection.is_connected
+                and connection.data_channel_ready
+            )
+            transport = connection.transport_state if connection else None
+            fingerprint = (
+                connected_now,
+                transport.peer if transport else "unavailable",
+                transport.ice if transport else "unavailable",
+                transport.data_channel if transport else "unavailable",
+                transport.data_channel_validated if transport else False,
+            )
+            previous = self._fleet_transport_fingerprints.get(profile.id)
+            if connection is not None and fingerprint != previous:
+                log_method = (
+                    LOGGER.warning
+                    if previous is not None and previous[0] and not connected_now
+                    else LOGGER.info
+                )
+                log_method(
+                    "Fleet transport transition: robot=%s connected=%s "
+                    "peer=%s ice=%s data_channel=%s validated=%s",
+                    profile.id,
+                    connected_now,
+                    fingerprint[1],
+                    fingerprint[2],
+                    fingerprint[3],
+                    fingerprint[4],
+                )
+            self._fleet_transport_fingerprints[profile.id] = fingerprint
             robots.append(
                 {
                     "id": profile.id,
@@ -352,11 +408,7 @@ class RobotPanelSession:
                     ),
                     "credentials_ready": not missing,
                     "missing": missing,
-                    "connected": bool(
-                        connection
-                        and connection.is_connected
-                        and connection.data_channel_ready
-                    ),
+                    "connected": connected_now,
                     "motion_mode": motion_mode,
                     "state": _snapshot_payload(snapshot),
                     "connect_error": self._fleet_connect_errors.get(profile.id),
@@ -448,6 +500,20 @@ class RobotPanelSession:
                     "kind": exc.kind.value,
                     "message": str(exc),
                 }
+                state = exc.state or connection.transport_state
+                LOGGER.warning(
+                    "Fleet connect failed: robot=%s kind=%s target_ip=%s "
+                    "peer=%s ice=%s data_channel=%s validated=%s",
+                    profile.id,
+                    exc.kind.value,
+                    getattr(connection, "effective_target_ip", None)
+                    or profile.connection.target_ip
+                    or "discovery",
+                    state.peer,
+                    state.ice,
+                    state.data_channel,
+                    state.data_channel_validated,
+                )
                 await connection.disconnect()
                 continue
             except Exception:
@@ -648,6 +714,120 @@ class RobotPanelSession:
                 (max(timestamps) - min(timestamps)) * 1000,
                 2,
             ) if timestamps else 0.0,
+        }
+
+    def _publish_selected_velocity_keepalive(
+        self,
+        pairs: list[tuple[Any, Go2Connection]],
+        *,
+        direction: str,
+        speed: float,
+    ) -> float:
+        """Publish one no-wait Move refresh to every selected robot."""
+
+        sent_at: list[float] = []
+        failures: list[str] = []
+        for profile, connection in pairs:
+            try:
+                sent_at.append(time.monotonic())
+                connection.publish_velocity_keepalive(direction, speed)
+            except Exception:
+                failures.append(profile.label)
+        if failures:
+            raise MotionError(
+                f"{'、'.join(failures)} 的 Move 持续帧发送失败。"
+            )
+        return round(
+            (max(sent_at) - min(sent_at)) * 1000,
+            2,
+        ) if sent_at else 0.0
+
+    async def _stream_selected_velocity(
+        self,
+        pairs: list[tuple[Any, Go2Connection]],
+        *,
+        direction: str,
+        speed: float,
+        duration: float,
+        stop_generation: int,
+        step_index: int,
+        label: str,
+    ) -> dict[str, Any]:
+        """Refresh the bounded Move RPC at 8 Hz for a held direction."""
+
+        started = time.monotonic()
+        deadline = started + duration
+        maximum_skew_ms = 0.0
+        acknowledgement: dict[str, Any] | None = None
+        acknowledgement_timed_out = False
+        acknowledgement_observed = False
+        acknowledgement_task = asyncio.create_task(
+            self._selected_checked_command(
+                pairs,
+                f"第 {step_index} 步 {label} 首帧",
+                lambda connection: connection.request_custom_motion(
+                    "velocity",
+                    {"direction": direction, "speed": speed},
+                ),
+                timeout=VELOCITY_ACK_TIMEOUT_SECONDS,
+                result_id="custom:velocity",
+            )
+        )
+        # Let the checked first frame reach the data channel before scheduling
+        # no-wait refreshes. Its response may be late without pausing the stream.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        frame_count = 1
+        next_tick = started + VELOCITY_PERIOD_SECONDS
+        while next_tick < deadline:
+            await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
+            if self._stop_generation != stop_generation:
+                raise MotionError("编舞已由 STOP SELECTED 中止。")
+            if acknowledgement_task.done() and not acknowledgement_observed:
+                try:
+                    acknowledgement = await acknowledgement_task
+                except CommandResponseTimeout:
+                    acknowledgement_timed_out = True
+                acknowledgement_observed = True
+            maximum_skew_ms = max(
+                maximum_skew_ms,
+                self._publish_selected_velocity_keepalive(
+                    pairs,
+                    direction=direction,
+                    speed=speed,
+                ),
+            )
+            frame_count += 1
+            next_tick = started + frame_count * VELOCITY_PERIOD_SECONDS
+        await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+        if not acknowledgement_observed:
+            try:
+                acknowledgement = await acknowledgement_task
+            except CommandResponseTimeout:
+                acknowledgement_timed_out = True
+            acknowledgement_observed = True
+        if acknowledgement is not None:
+            maximum_skew_ms = max(
+                maximum_skew_ms,
+                float(acknowledgement["start_skew_ms"]),
+            )
+            codes = acknowledgement["codes"]
+            accepted = acknowledgement["accepted"]
+            response_shapes = acknowledgement["response_shapes"]
+        else:
+            codes = {profile.id: None for profile, _ in pairs}
+            accepted = {profile.id: None for profile, _ in pairs}
+            response_shapes = {
+                profile.id: "response_timeout" for profile, _ in pairs
+            }
+        return {
+            "frame_count": frame_count,
+            "stream_hz": VELOCITY_STREAM_HZ,
+            "start_skew_ms": maximum_skew_ms,
+            "codes": codes,
+            "accepted": accepted,
+            "response_shapes": response_shapes,
+            "acknowledgement_timed_out": acknowledgement_timed_out,
         }
 
     async def _selected_best_effort_stop(
@@ -909,9 +1089,9 @@ class RobotPanelSession:
                     )
 
             task.add_done_callback(consume_late_response)
-            raise MotionError(
+            raise CommandResponseTimeout(
                 f"{command} 指令已经发出，但 {timeout:g} 秒内未收到匹配回包；"
-                "系统已中止后续步骤并尝试 StopMove。"
+                "回包可能稍后到达。"
             ) from exc
 
     def run_posture(
@@ -1153,7 +1333,9 @@ class RobotPanelSession:
 
         completed: list[dict[str, Any]] = []
         stop_codes: dict[str, int | None] = {}
+        velocity_stop_codes: dict[str, int | None] = {}
         warnings: list[str] = []
+        terminal_velocity_stop_confirmed = False
         try:
             for index, step in enumerate(steps, start=1):
                 if self._stop_generation != stop_generation:
@@ -1225,18 +1407,25 @@ class RobotPanelSession:
                         f"编舞 {index}/{len(steps)} · {label} · "
                         f"{len(pairs)} 个对象"
                     )
-                    deadline_stop: asyncio.Task[
-                        tuple[dict[str, int | None], list[str]]
-                    ] | None = None
+                    next_step = steps[index] if index < len(steps) else None
+                    velocity_chain_continues = bool(
+                        kind == "velocity"
+                        and next_step is not None
+                        and next_step.get("kind") == "velocity"
+                    )
+                    stream_result: dict[str, Any] | None = None
                     if kind == "velocity":
-                        async def stop_at_deadline() -> tuple[
-                            dict[str, int | None], list[str]
-                        ]:
-                            await asyncio.sleep(step["duration"])
-                            return await self._selected_best_effort_stop(pairs)
-
-                        deadline_stop = asyncio.create_task(stop_at_deadline())
-                    try:
+                        stream_result = await self._stream_selected_velocity(
+                            pairs,
+                            direction=step["direction"],
+                            speed=step["speed"],
+                            duration=step["duration"],
+                            stop_generation=stop_generation,
+                            step_index=index,
+                            label=label,
+                        )
+                        command_result = None
+                    else:
                         command_result = await self._selected_checked_command(
                             pairs,
                             f"第 {index} 步 {label}",
@@ -1247,17 +1436,12 @@ class RobotPanelSession:
                             timeout=4.0,
                             result_id=result_id,
                         )
-                    except BaseException:
-                        if deadline_stop is not None:
-                            deadline_stop.cancel()
-                            await asyncio.gather(deadline_stop, return_exceptions=True)
-                        raise
                     effects: dict[str, bool | None] = {
                         profile.id: None for profile, _ in pairs
                     }
                     observed_rpy: dict[str, list[float]] = {}
                     delta_rpy: dict[str, list[float]] = {}
-                    velocity_stop_codes: dict[str, int | None] = {}
+                    step_stop_codes: dict[str, int | None] = {}
                     if kind == "euler":
                         observation_delay = min(
                             0.8,
@@ -1303,8 +1487,11 @@ class RobotPanelSession:
                                     tuple(observed_rpy[profile.id]),
                                     effects[profile.id],
                                 )
-                    elif deadline_stop is not None:
-                        velocity_stop_codes, stop_warnings = await deadline_stop
+                    elif not velocity_chain_continues:
+                        velocity_stop_codes, stop_warnings = (
+                            await self._selected_best_effort_stop(pairs)
+                        )
+                        step_stop_codes = dict(velocity_stop_codes)
                         warnings.extend(stop_warnings)
                         unconfirmed = [
                             profile.label
@@ -1317,20 +1504,47 @@ class RobotPanelSession:
                                 f"{'、'.join(unconfirmed)} 未明确确认 StopMove；"
                                 "已中止后续步骤并再次尝试 StopMove。"
                             )
-                    completed.append(
-                        {
-                            "kind": kind,
-                            "label": label,
-                            "duration": step["duration"],
-                            "codes": command_result["codes"],
-                            "accepted_by_robot": command_result["accepted"],
-                            "effect_observed": effects,
-                            "observed_rpy": observed_rpy,
-                            "delta_rpy": delta_rpy,
-                            "stop_status": velocity_stop_codes,
-                            "start_skew_ms": command_result["start_skew_ms"],
-                        }
-                    )
+                        terminal_velocity_stop_confirmed = index == len(steps)
+                    if kind == "velocity":
+                        assert stream_result is not None
+                        if stream_result["acknowledgement_timed_out"]:
+                            warnings.append(
+                                f"第 {index} 步 {label} 首帧回包延迟；"
+                                "后续刷新帧已按时发送，并在链尾执行 StopMove。"
+                            )
+                        completed.append(
+                            {
+                                "kind": kind,
+                                "label": label,
+                                "duration": step["duration"],
+                                "codes": stream_result["codes"],
+                                "accepted_by_robot": stream_result["accepted"],
+                                "response_shape": "streamed_move_rpc",
+                                "frame_count": stream_result["frame_count"],
+                                "stream_hz": stream_result["stream_hz"],
+                                "acknowledgement_timed_out": stream_result[
+                                    "acknowledgement_timed_out"
+                                ],
+                                "stop_status": step_stop_codes,
+                                "start_skew_ms": stream_result["start_skew_ms"],
+                            }
+                        )
+                    else:
+                        assert command_result is not None
+                        completed.append(
+                            {
+                                "kind": kind,
+                                "label": label,
+                                "duration": step["duration"],
+                                "codes": command_result["codes"],
+                                "accepted_by_robot": command_result["accepted"],
+                                "effect_observed": effects,
+                                "observed_rpy": observed_rpy,
+                                "delta_rpy": delta_rpy,
+                                "stop_status": {},
+                                "start_skew_ms": command_result["start_skew_ms"],
+                            }
+                        )
                     invisible = [
                         profile.label
                         for profile, _ in pairs
@@ -1367,8 +1581,15 @@ class RobotPanelSession:
                 if self._stop_generation != stop_generation:
                     raise MotionError("编舞已由 STOP SELECTED 中止。")
         finally:
-            stop_codes, stop_warnings = await self._selected_best_effort_stop(pairs)
-            warnings.extend(stop_warnings)
+            if terminal_velocity_stop_confirmed:
+                # The final contiguous velocity segment already issued and
+                # confirmed its one terminal StopMove. Do not send a duplicate
+                # stop: some GO2 Air firmware visibly twitches on back-to-back
+                # neutral commands.
+                stop_codes = velocity_stop_codes
+            else:
+                stop_codes, stop_warnings = await self._selected_best_effort_stop(pairs)
+                warnings.extend(stop_warnings)
 
         self._action_results["choreography"] = {
             "status": "accepted",

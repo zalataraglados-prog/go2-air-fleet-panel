@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ from go2.config import load_config
 from go2.connection import FailureKind, Go2ConnectionError, TransportState
 from go2.motion import MotionError
 from go2.panel import (
+    CommandResponseTimeout,
     RobotPanelSession,
     action_response_timeout,
     create_panel_app,
@@ -22,12 +24,19 @@ from go2.state import LowState, SportModeState, StateSnapshot
 
 class FakePanelSession:
     def __init__(self) -> None:
-        self.connected = False
+        self.connected = True
+        self.offline_robot_ids: set[str] = set()
         self.calls: list[str] = []
 
     def status(self) -> dict[str, Any]:
+        robot_ids = [f"dog_{index}" for index in range(1, 7)]
+        robot_connections = {
+            robot_id: self.connected and robot_id not in self.offline_robot_ids
+            for robot_id in robot_ids
+        }
+        connected_count = sum(robot_connections.values())
         return {
-            "connected": self.connected,
+            "connected": robot_connections["dog_1"],
             "busy": False,
             "operation": None,
             "state": None,
@@ -35,16 +44,16 @@ class FakePanelSession:
             "fleet": {
                 "configured_count": 6,
                 "ready_to_connect": True,
-                "connected": self.connected,
-                "connected_count": 6 if self.connected else 0,
-                "inspected": self.connected,
+                "connected": connected_count == 6,
+                "connected_count": connected_count,
+                "inspected": connected_count == 6,
                 "robots": [
-                    {"id": "dog_1", "label": "机器狗 1", "connected": self.connected},
-                    {"id": "dog_2", "label": "机器狗 2", "connected": self.connected},
-                    {"id": "dog_3", "label": "机器狗 3", "connected": self.connected},
-                    {"id": "dog_4", "label": "机器狗 4", "connected": self.connected},
-                    {"id": "dog_5", "label": "机器狗 5", "connected": self.connected},
-                    {"id": "dog_6", "label": "机器狗 6", "connected": self.connected},
+                    {
+                        "id": robot_id,
+                        "label": f"机器狗 {index}",
+                        "connected": robot_connections[robot_id],
+                    }
+                    for index, robot_id in enumerate(robot_ids, start=1)
                 ],
             },
             "actions": [],
@@ -53,6 +62,7 @@ class FakePanelSession:
     def connect(self) -> dict[str, Any]:
         self.calls.append("connect")
         self.connected = True
+        self.offline_robot_ids.clear()
         return self.status()
 
     def disconnect(self) -> dict[str, Any]:
@@ -77,6 +87,7 @@ class FakePanelSession:
     def connect_fleet(self) -> dict[str, Any]:
         self.calls.append("connect_fleet")
         self.connected = True
+        self.offline_robot_ids.clear()
         return self.status()
 
     def refresh_fleet_state(self) -> dict[str, Any]:
@@ -150,6 +161,7 @@ def test_index_contains_no_secret_and_has_security_headers(panel: Any) -> None:
     assert response.headers["X-Frame-Options"] == "DENY"
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
     assert "框选执行对象" in response.get_data(as_text=True)
+    assert "默认不选择任何设备" in response.get_data(as_text=True)
     assert 'href="/settings"' in response.get_data(as_text=True)
     assert "连接 / 重试可用机器狗" not in response.get_data(as_text=True)
     assert "转圈" not in response.get_data(as_text=True)
@@ -166,6 +178,7 @@ def test_settings_page_separates_connection_controls_and_hides_secrets(
     assert "连接 / 重试离线设备" in text
     assert "动作台偏好" in text
     assert "自动发现并连接" in text
+    assert "仅在线设备" not in text
     assert 'href="/"' in text
     assert response.headers["Cache-Control"] == "no-store"
 
@@ -435,6 +448,59 @@ def test_motion_routes_reject_invalid_rts_selection(
     assert session.calls == []
 
 
+@pytest.mark.parametrize(
+    ("path", "payload", "expected_call"),
+    [
+        (
+            "/api/actions/stand_up",
+            {"confirm_clearance": True, "robot_ids": ["dog_1", "dog_2"]},
+            "stand_up:dog_1,dog_2",
+        ),
+        (
+            "/api/library/hello",
+            {"confirm_clearance": True, "robot_ids": ["dog_1", "dog_2"]},
+            "library:hello:dog_1,dog_2",
+        ),
+        (
+            "/api/choreographies/run",
+            {
+                "confirm_clearance": True,
+                "robot_ids": ["dog_1", "dog_2"],
+                "steps": [{"action": "hello", "duration": 1.0}],
+            },
+            "choreography:1:dog_1,dog_2",
+        ),
+    ],
+)
+def test_motion_routes_allow_selected_online_robots_when_others_are_offline(
+    panel: Any,
+    path: str,
+    payload: dict[str, Any],
+    expected_call: str,
+) -> None:
+    client, session, token = panel
+    session.offline_robot_ids.add("dog_3")
+
+    response = client.post(path, headers=headers(token), json=payload)
+
+    assert response.status_code == 200
+    assert session.calls == [expected_call]
+
+
+def test_stop_move_remains_available_after_partial_disconnect(panel: Any) -> None:
+    client, session, token = panel
+    session.offline_robot_ids.add("dog_3")
+
+    response = client.post(
+        "/api/stop-move",
+        headers=headers(token),
+        json={"robot_ids": ["dog_1"]},
+    )
+
+    assert response.status_code == 200
+    assert session.calls == ["stop_move:dog_1"]
+
+
 def test_unknown_action_is_rejected_by_server_allowlist(panel: Any) -> None:
     client, session, token = panel
     response = client.post(
@@ -538,7 +604,7 @@ def test_choreography_accepts_bounded_custom_primitives(panel: Any) -> None:
         {"kind": "body_height", "height": -0.04, "duration": 1},
         {"kind": "euler", "roll": 0, "pitch": 0, "yaw": 0, "api_id": 1007, "duration": 1},
         {"kind": "wait", "api_id": 1003, "duration": 1},
-        {"kind": "velocity", "direction": "forward", "speed": 0.3, "duration": 1},
+        {"kind": "velocity", "direction": "left", "speed": 0.31, "duration": 1},
         {"kind": "velocity", "direction": "clockwise", "speed": 0.3, "duration": 3.5},
     ],
 )
@@ -568,3 +634,83 @@ def test_choreography_rejects_unsafe_custom_parameters_or_api_injection(
 def test_choreography_bounds_are_enforced(steps: Any) -> None:
     with pytest.raises(ValueError):
         validate_choreography_steps(steps)
+
+
+@pytest.mark.asyncio
+async def test_velocity_stream_refreshes_move_rpc_at_8hz() -> None:
+    class FakeVelocityConnection:
+        def __init__(self) -> None:
+            self.keepalives: list[tuple[str, float]] = []
+
+        def publish_velocity_keepalive(
+            self, direction: str, speed: float
+        ) -> None:
+            self.keepalives.append((direction, speed))
+
+    session = RobotPanelSession.__new__(RobotPanelSession)
+    session._stop_generation = 0
+    calls: list[str] = []
+    timeouts: list[float] = []
+
+    async def checked_command(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs["result_id"])
+        timeouts.append(kwargs["timeout"])
+        return {
+            "codes": {"dog_1": 0},
+            "accepted": {"dog_1": True},
+            "response_shapes": {"dog_1": "native:code"},
+            "start_skew_ms": 0.0,
+        }
+
+    session._selected_checked_command = checked_command
+    connection = FakeVelocityConnection()
+    result = await session._stream_selected_velocity(
+        [(SimpleNamespace(id="dog_1", label="机器狗 1"), connection)],
+        direction="clockwise",
+        speed=0.35,
+        duration=0.26,
+        stop_generation=0,
+        step_index=1,
+        label="顺时针原地旋转",
+    )
+
+    assert result["stream_hz"] == 8
+    assert result["frame_count"] == 3
+    assert result["codes"] == {"dog_1": 0}
+    assert calls == ["custom:velocity"]
+    assert timeouts == [1.2]
+    assert connection.keepalives == [("clockwise", 0.35)] * 2
+
+
+@pytest.mark.asyncio
+async def test_velocity_stream_keeps_refreshing_when_first_ack_is_late() -> None:
+    class FakeVelocityConnection:
+        def __init__(self) -> None:
+            self.keepalive_count = 0
+
+        def publish_velocity_keepalive(
+            self, direction: str, speed: float
+        ) -> None:
+            self.keepalive_count += 1
+
+    session = RobotPanelSession.__new__(RobotPanelSession)
+    session._stop_generation = 0
+
+    async def checked_command(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise CommandResponseTimeout("late")
+
+    session._selected_checked_command = checked_command
+    connection = FakeVelocityConnection()
+    result = await session._stream_selected_velocity(
+        [(SimpleNamespace(id="dog_1", label="机器狗 1"), connection)],
+        direction="forward",
+        speed=0.15,
+        duration=0.26,
+        stop_generation=0,
+        step_index=1,
+        label="前进",
+    )
+
+    assert result["acknowledgement_timed_out"] is True
+    assert result["accepted"] == {"dog_1": None}
+    assert connection.keepalive_count == 2

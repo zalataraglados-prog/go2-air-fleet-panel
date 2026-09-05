@@ -25,7 +25,7 @@ CUSTOM_MOTION_LIMITS: dict[str, dict[str, Any]] = {
         "api_id": 1008,
         "bounds": {
             "linear": (0.05, 0.25),
-            "lateral": (0.05, 0.20),
+            "lateral": (0.05, 0.30),
             "angular": (0.10, 0.50),
             "duration": (0.50, 3.00),
         },
@@ -40,7 +40,6 @@ VELOCITY_DIRECTIONS: dict[str, tuple[str, str, float]] = {
     "counterclockwise": ("逆时针原地旋转", "z", 1.0),
     "clockwise": ("顺时针原地旋转", "z", -1.0),
 }
-
 
 def _bounded_number(
     value: Any,
@@ -165,4 +164,6 @@ def public_custom_motion_limits() -> dict[str, dict[str, Any]]:
         direction: label
         for direction, (label, _, _) in VELOCITY_DIRECTIONS.items()
     }
+    result["velocity"]["unit"] = "si_velocity"
+    result["velocity"]["stream_hz"] = 8
     return result

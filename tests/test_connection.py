@@ -8,7 +8,13 @@ import pytest
 
 import go2.connection as connection_module
 from go2.config import ConnectionConfig
-from go2.connection import FailureKind, Go2Connection, Go2ConnectionError
+from go2.connection import (
+    FailureKind,
+    Go2Connection,
+    Go2ConnectionError,
+    cached_ip_matches_lan,
+    constrain_ice_host_candidates,
+)
 
 
 class AesRequiredError(RuntimeError):
@@ -309,6 +315,89 @@ async def test_cached_ip_is_fallback_when_discovery_is_blocked(fake_sdk: Any) ->
     await connection.disconnect()
 
 
+@pytest.mark.parametrize(
+    ("cached_ip", "local_interfaces", "expected"),
+    [
+        ("192.168.8.181", "192.168.8.10", True),
+        ("192.168.8.181", "192.168.0.104", False),
+        ("169.254.95.224", "192.168.0.104", False),
+        ("192.168.8.181", "no usable IPv4 interface", False),
+        (None, "192.168.8.10", False),
+    ],
+)
+def test_cached_ip_must_match_current_physical_lan(
+    cached_ip: str | None,
+    local_interfaces: str,
+    expected: bool,
+) -> None:
+    assert cached_ip_matches_lan(cached_ip, local_interfaces) is expected
+
+
+def test_ice_host_candidates_are_limited_to_selected_private_lan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import aioice.ice as aioice_ice
+
+    monkeypatch.setattr(
+        aioice_ice,
+        "get_host_addresses",
+        lambda use_ipv4, use_ipv6: ["unpatched"],
+    )
+
+    selected = constrain_ice_host_candidates(
+        (
+            "192.168.0.104",
+            "192.168.0.104",
+            "169.254.95.224",
+            "127.0.0.1",
+            "invalid",
+        )
+    )
+
+    assert selected == ("192.168.0.104",)
+    assert aioice_ice.get_host_addresses(True, True) == ["192.168.0.104"]
+    assert aioice_ice.get_host_addresses(False, True) == []
+
+
+def test_datachannel_only_driver_disables_unused_media_transceivers() -> None:
+    driver = SimpleNamespace(
+        WebRTCAudioChannel=object(),
+        WebRTCVideoChannel=object(),
+    )
+
+    connection_module._configure_datachannel_only_driver(driver)
+
+    assert driver.WebRTCAudioChannel is connection_module._DisabledMediaChannel
+    assert driver.WebRTCVideoChannel is connection_module._DisabledMediaChannel
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached_ip", ["169.254.95.224", "192.168.8.181"])
+async def test_stale_cached_ip_is_not_used_on_a_different_lan(
+    fake_sdk: Any,
+    cached_ip: str,
+) -> None:
+    created: list[FakeConnection] = []
+
+    def factory(method: Any, **kwargs: Any) -> FakeConnection:
+        instance = FakeConnection(method, **kwargs)
+        created.append(instance)
+        return instance
+
+    connection = Go2Connection(
+        settings(ip=cached_ip, serial_number="TEST-SN"),
+        connection_factory=factory,
+        discovery_function=lambda serial: (None, "192.168.0.104"),
+    )
+
+    with pytest.raises(Go2ConnectionError) as caught:
+        await connection.connect()
+
+    assert caught.value.kind is FailureKind.ROBOT_NOT_FOUND
+    assert "Cached address rejected" in str(caught.value)
+    assert created == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "expected"),
@@ -408,6 +497,8 @@ async def test_only_allowlisted_action_requests_are_exposed(fake_sdk: Any) -> No
     forward = await connection.request_custom_motion(
         "velocity", {"direction": "forward", "speed": 0.15}
     )
+    connection.publish_velocity_keepalive("right", 0.12)
+    raw_connection = connection._connection
     with pytest.raises(ValueError):
         await connection.request_library_action("arbitrary_9999")
     with pytest.raises(ValueError):
@@ -455,3 +546,9 @@ async def test_only_allowlisted_action_requests_are_exposed(fake_sdk: Any) -> No
         "topic": "rt/api/sport/request",
         "options": {"api_id": 1008, "parameter": {"x": 0.15, "y": 0.0, "z": 0.0}},
     }
+    assert len(raw_connection.no_reply_calls) == 1
+    topic, payload, message_type = raw_connection.no_reply_calls[0]
+    assert topic == "rt/api/sport/request"
+    assert message_type == "req"
+    assert payload["header"]["identity"]["api_id"] == 1008
+    assert payload["parameter"] == '{"x": 0.0, "y": -0.12, "z": 0.0}'

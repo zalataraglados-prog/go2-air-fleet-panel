@@ -19,21 +19,16 @@ const ui = Object.fromEntries([
 function loadPreferences() {
   const defaults = {
     autoConnect: true,
-    initialSelection: 'all',
     pollIntervalMs: 2000,
     compactCards: false,
   };
   try {
     const saved = JSON.parse(localStorage.getItem(preferencesStorageKey) || '{}');
-    const initialSelection = ['all', 'online', 'none'].includes(saved.initialSelection)
-      ? saved.initialSelection
-      : defaults.initialSelection;
     const pollIntervalMs = [1000, 2000, 5000].includes(Number(saved.pollIntervalMs))
       ? Number(saved.pollIntervalMs)
       : defaults.pollIntervalMs;
     return {
       autoConnect: saved.autoConnect !== false,
-      initialSelection,
       pollIntervalMs,
       compactCards: saved.compactCards === true,
     };
@@ -55,6 +50,9 @@ let featuredAutoLoaded = false;
 let marqueeDrag = null;
 let autoConnectInFlight = false;
 let nextAutoConnectAt = 0;
+const autoConnectMinimumDelayMs = 10000;
+const autoConnectMaximumDelayMs = 60000;
+let autoConnectDelayMs = autoConnectMinimumDelayMs;
 
 function now() { return new Date().toLocaleTimeString('zh-CN', { hour12: false }); }
 
@@ -158,9 +156,12 @@ function robotStateDetail(robot) {
   const velocity = Array.isArray(state.velocity)
     ? state.velocity.map((value) => Number(value).toFixed(3)).join(' / ')
     : '--';
+  const position = Array.isArray(state.position)
+    ? state.position.slice(0, 2).map((value) => Number(value).toFixed(2)).join(' / ')
+    : '--';
   return identity + ' · ' + mode +
     ' · 电量 ' + Number(state.battery_soc).toFixed(0) + '%' +
-    ' · mode ' + state.mode + ' · v ' + velocity +
+    ' · mode ' + state.mode + ' · pos ' + position + ' · v ' + velocity +
     ' · yaw ' + Number(state.yaw_speed).toFixed(3) + missing + connectionError;
 }
 
@@ -194,12 +195,7 @@ function renderFleet(fleet) {
   current.fleet = fleet;
   const configuredIds = (fleet.robots || []).map((robot) => robot.id);
   if (!selectionInitialized && configuredIds.length) {
-    const initialIds = preferences.initialSelection === 'none'
-      ? []
-      : preferences.initialSelection === 'online'
-        ? fleet.robots.filter((robot) => robot.connected).map((robot) => robot.id)
-        : configuredIds;
-    selectedRobotIds = new Set(initialIds);
+    selectedRobotIds = new Set();
     selectionInitialized = true;
   } else {
     selectedRobotIds = new Set(
@@ -320,7 +316,7 @@ function updateControlLocks() {
   const controllerReady = actionControllerReady();
   document.querySelectorAll('[data-posture]').forEach((button) => {
     button.disabled = !ready;
-    button.title = selectedReady ? '' : '请先选择已在线的机器狗。';
+    button.title = selectedReady ? '' : '请至少选择一只在线机器狗，且不要包含离线设备。';
   });
   document.querySelectorAll('[data-library-action]').forEach((button) => {
     const action = current.actions.find(
@@ -338,7 +334,7 @@ function updateControlLocks() {
     button.title = action?.available === false
       ? action.unavailable_reason
       : !selectedReady
-        ? '请先选择已在线的机器狗。'
+        ? '请至少选择一只在线机器狗，且不要包含离线设备。'
         : !postureAction && !controllerReady
           ? '全部选中对象必须先起立。'
           : '';
@@ -346,7 +342,7 @@ function updateControlLocks() {
   ui.runChoreography.disabled =
     !ready || !controllerReady || timeline.length === 0;
   ui.runChoreography.title = !selectedReady
-    ? '请先选择已在线的机器狗。'
+    ? '请至少选择一只在线机器狗，且不要包含离线设备。'
     : controllerReady ? '' : '全部选中对象必须先起立。';
   ui.stopButton.disabled = !selectedReady;
 }
@@ -367,8 +363,8 @@ function render(status) {
       ? connectedCount + ' / ' + configuredCount + ' 台 WebRTC 已就绪'
       : '机器狗当前未连接';
   ui.connectionDetail.textContent = anyConnected
-    ? '动作目标由 RTS 编队选择统一控制；多目标指令并发下发并分别校验。'
-    : '页面只在本机运行；连接后由编队选择决定每次动作的执行对象。';
+    ? '只操作当前选中的在线设备；未选中或离线设备不会阻止其余在场设备执行。'
+    : '页面只在本机运行；连接后手动选择本次动作的执行对象。';
   ensureLibrary(current.actions || []);
   updateActionResults();
   renderFleet(fleet);
@@ -607,8 +603,8 @@ function updateVelocitySpeedBounds() {
   const rotating = ['clockwise', 'counterclockwise'].includes(direction);
   const lateral = ['left', 'right'].includes(direction);
   ui.customSpeed.min = rotating ? '0.10' : '0.05';
-  ui.customSpeed.max = rotating ? '0.50' : lateral ? '0.20' : '0.25';
-  ui.customSpeed.value = rotating ? '0.35' : lateral ? '0.12' : '0.15';
+  ui.customSpeed.max = rotating ? '0.50' : lateral ? '0.30' : '0.25';
+  ui.customSpeed.value = rotating ? '0.35' : lateral ? '0.25' : '0.15';
   ui.customSpeedUnit.textContent = rotating ? 'rad/s' : 'm/s';
 }
 ui.customDirection.addEventListener('change', updateVelocitySpeedBounds);
@@ -627,7 +623,7 @@ ui.addCustomStep.addEventListener('click', () => {
     const rotating = ['clockwise', 'counterclockwise'].includes(direction);
     const lateral = ['left', 'right'].includes(direction);
     const minimum = rotating ? 0.10 : 0.05;
-    const maximum = rotating ? 0.50 : lateral ? 0.20 : 0.25;
+    const maximum = rotating ? 0.50 : lateral ? 0.30 : 0.25;
     if (duration > 3) return log('摇杆移动单步最多持续 3 秒。', 'warning');
     if (!Number.isFinite(speed) || speed < minimum || speed > maximum) return log('移动速度超出面板保守范围。', 'warning');
     step = { kind, direction, speed, duration };
@@ -654,12 +650,13 @@ async function maybeAutoConnect() {
     fleet.connected || !fleet.ready_to_connect || Date.now() < nextAutoConnectAt
   ) return;
   autoConnectInFlight = true;
-  nextAutoConnectAt = Date.now() + 10000;
   render({ busy: true, operation: '自动发现并连接设备' });
   log('检测到离线设备，正在自动发现当前 WiFi 地址。');
+  let fleetReady = false;
   try {
     const result = await api('/api/fleet/connect', { method: 'POST', body: {} });
     render(result);
+    fleetReady = result.fleet?.connected === true;
     if (result.warning) log(result.warning, 'warning');
     else log('全部设备已自动连接。', 'success');
   } catch (error) {
@@ -667,6 +664,17 @@ async function maybeAutoConnect() {
   } finally {
     autoConnectInFlight = false;
     try { render(await api('/api/status')); } catch { render({ busy: false }); }
+    if (fleetReady) {
+      autoConnectDelayMs = autoConnectMinimumDelayMs;
+    } else {
+      const retryDelayMs = autoConnectDelayMs;
+      nextAutoConnectAt = Date.now() + retryDelayMs;
+      autoConnectDelayMs = Math.min(
+        autoConnectDelayMs * 2,
+        autoConnectMaximumDelayMs,
+      );
+      log(`自动补连将在 ${retryDelayMs / 1000} 秒后重试。`, 'warning');
+    }
   }
 }
 

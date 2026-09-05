@@ -30,7 +30,7 @@
           <div><p class="section-label">RTS / 可扩展编队</p><h2>框选执行对象</h2></div>
           <span id="selectionSummary" class="tag">已选择 0 / 0</span>
         </div>
-        <p id="selectionHelp" class="editor-note">拖动空白区域框选；单击选择一个；Shift / Ctrl / ⌘ 单击可追加或取消。下方所有动作只发送给选中对象。</p>
+        <p id="selectionHelp" class="editor-note">默认不选择任何设备。请选择当前在场且在线的执行对象；拖动空白区域框选，Shift / Ctrl / ⌘ 单击可追加或取消。</p>
         <div id="selectionBoard" class="selection-board" aria-label="机器狗编队选择区">
           <div id="fleetRobots" class="robot-grid" role="listbox" aria-multiselectable="true"></div>
           <div id="selectionMarquee" class="selection-marquee" hidden></div>
@@ -43,7 +43,7 @@
       </section>
 
       <section class="panel safety-deck">
-        <div class="safety-copy"><p class="section-label">执行锁</p><h2>确认选中对象的现场</h2><p>每个选中对象独立预检；动作结束向同一组发送 StopMove。它不是物理急停。</p></div>
+        <div class="safety-copy"><p class="section-label">执行锁</p><h2>确认选中对象的现场</h2><p>每个选中对象必须在线并独立预检；未选中设备不影响执行。动作结束向同一组发送 StopMove，它不是物理急停。</p></div>
         <label class="clearance"><input id="clearanceCheck" type="checkbox"><span>所有选中对象均有独立净空，地面水平防滑，人员已远离</span></label>
         <label class="advanced-ack"><span>高风险解锁短语</span><input id="highRiskPhrase" type="text" autocomplete="off" placeholder="GO2 HIGH RISK"></label>
       </section>
@@ -74,7 +74,7 @@
           </div>
           <ol id="timeline" class="timeline"></ol>
           <div class="editor-actions"><button id="loadFeatured" class="button ghost">载入流光摆尾</button><button id="saveDraft" class="button ghost">保存草稿</button><button id="loadDraft" class="button ghost">读取草稿</button><button id="clearTimeline" class="button ghost">清空</button></div>
-          <button id="runChoreography" class="hold-button choreography-run" disabled><span class="hold-fill"></span><span class="hold-copy"><b>执行当前编舞</b><small>长按 1.2 秒 · 最多 12 步 / 40 秒</small></span></button>
+          <button id="runChoreography" class="hold-button choreography-run" disabled><span class="hold-fill"></span><span class="hold-copy"><b>执行当前编舞</b><small>长按 1.2 秒 · 连续移动仅链尾停止 · 最多 12 步 / 40 秒</small></span></button>
         </article>
       </section>
 

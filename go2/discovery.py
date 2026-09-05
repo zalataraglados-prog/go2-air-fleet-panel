@@ -15,6 +15,23 @@ GO2_MULTICAST_GROUP = "231.1.1.1"
 QUERY_PORT = 10131
 REPLY_PORT = 10134
 QUERY_NAME = "unitree_dapengche"
+_VIRTUAL_INTERFACE_MARKERS = (
+    "docker",
+    "hamachi",
+    "hyper-v",
+    "loopback",
+    "oray",
+    "radmin",
+    "tap",
+    "tailscale",
+    "tun",
+    "virtual",
+    "vmware",
+    "vpn",
+    "vethernet",
+    "wsl",
+    "zerotier",
+)
 
 
 def preferred_local_ipv4() -> str:
@@ -29,48 +46,79 @@ def preferred_local_ipv4() -> str:
         sock.close()
 
 
-def local_ipv4_candidates() -> tuple[str, ...]:
-    """Return usable IPv4 interfaces, preferring the ordinary routed address."""
+def _looks_virtual_interface(interface_name: str) -> bool:
+    normalized = interface_name.casefold()
+    return any(marker in normalized for marker in _VIRTUAL_INTERFACE_MARKERS)
 
-    addresses: list[str] = []
+
+def _usable_lan_ipv4(value: str) -> bool:
     try:
-        addresses.append(preferred_local_ipv4())
-    except OSError:
-        pass
-    try:
-        addresses.extend(socket.gethostbyname_ex(socket.gethostname())[2])
-    except OSError:
-        pass
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return bool(
+        address.version == 4
+        and address.is_private
+        and not address.is_loopback
+        and not address.is_link_local
+        and not address.is_unspecified
+    )
+
+
+def local_ipv4_candidates() -> tuple[str, ...]:
+    """Return physical private-LAN IPv4 interfaces in route preference order."""
+
+    physical_addresses: list[str] = []
     try:
         interface_stats = psutil.net_if_stats()
         for interface_name, interface_addresses in psutil.net_if_addrs().items():
             stats = interface_stats.get(interface_name)
-            if stats is not None and not stats.isup:
+            if (
+                (stats is not None and not stats.isup)
+                or _looks_virtual_interface(interface_name)
+            ):
                 continue
-            addresses.extend(
-                item.address
-                for item in interface_addresses
-                if item.family == socket.AF_INET
-            )
+            for item in interface_addresses:
+                if (
+                    item.family == socket.AF_INET
+                    and _usable_lan_ipv4(item.address)
+                    and item.address not in physical_addresses
+                ):
+                    physical_addresses.append(item.address)
     except (OSError, RuntimeError):
-        # Hostname resolution still provides a dependency-free fallback.
+        # Route and hostname resolution remain a dependency-free fallback.
         pass
-    result: list[str] = []
-    for value in addresses:
-        try:
-            address = ipaddress.ip_address(value)
-        except ValueError:
-            continue
-        if (
-            address.version != 4
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_unspecified
-            or value in result
-        ):
-            continue
-        result.append(value)
-    return tuple(result)
+
+    try:
+        preferred = preferred_local_ipv4()
+    except OSError:
+        preferred = None
+    if preferred and _usable_lan_ipv4(preferred):
+        preferred_network = ipaddress.ip_network(f"{preferred}/24", strict=False)
+        physical_addresses = [
+            value
+            for value in physical_addresses
+            if ipaddress.ip_address(value) in preferred_network
+        ]
+    if preferred in physical_addresses:
+        physical_addresses.remove(preferred)
+        physical_addresses.insert(0, preferred)
+    if physical_addresses:
+        return tuple(physical_addresses)
+
+    fallback: list[str] = []
+    if preferred and _usable_lan_ipv4(preferred):
+        fallback.append(preferred)
+    try:
+        hostname_addresses = socket.gethostbyname_ex(socket.gethostname())[2]
+    except OSError:
+        hostname_addresses = []
+    fallback.extend(
+        value
+        for value in hostname_addresses
+        if _usable_lan_ipv4(value) and value not in fallback
+    )
+    return tuple(fallback)
 
 
 def _route_interface_for(remote_ip: str, fallback: str) -> str:

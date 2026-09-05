@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from go2.custom_motion import build_custom_motion_request, validate_custom_motion_step
+from go2.custom_motion import (
+    build_custom_motion_request,
+    validate_custom_motion_step,
+)
 
 
 def test_euler_request_uses_fixed_official_api_and_axes() -> None:
@@ -38,7 +41,7 @@ def test_velocity_request_uses_fixed_move_api_and_one_axis(
         {"kind": "body_height", "height": -0.04, "duration": 1},
         {"kind": "wait", "api_id": 1003, "duration": 1},
         {"kind": "velocity", "direction": "forward", "speed": 0.26, "duration": 1},
-        {"kind": "velocity", "direction": "left", "speed": 0.21, "duration": 1},
+        {"kind": "velocity", "direction": "left", "speed": 0.31, "duration": 1},
         {"kind": "velocity", "direction": "clockwise", "speed": 0.51, "duration": 1},
         {"kind": "velocity", "direction": "forward", "speed": 0.15, "duration": 3.01},
         {"kind": "velocity", "direction": "diagonal", "speed": 0.15, "duration": 1},
