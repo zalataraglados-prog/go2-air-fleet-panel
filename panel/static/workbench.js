@@ -1,12 +1,13 @@
 const token = document.querySelector('meta[name="go2-panel-token"]').content;
-const draftStorageKey = 'go2_choreography_v4';
+const draftStorageKey = 'go2_choreography_v5';
+const legacyDraftStorageKey = 'go2_choreography_v4';
 const preferencesStorageKey = 'go2_panel_preferences_v1';
 const ui = Object.fromEntries([
   'connectionBadge', 'connectionTitle', 'connectionDetail',
   'stopButton', 'clearanceCheck', 'highRiskPhrase', 'activityList',
   'clearActivity', 'actionLibrary',
   'libraryFilters', 'editorAction', 'editorDuration', 'addStep', 'timeline',
-  'timelineTotal', 'loadFeatured', 'featuredDescription', 'saveDraft', 'loadDraft',
+  'timelineTotal', 'draftStatus', 'loadFeatured', 'featuredDescription', 'saveDraft', 'loadDraft',
   'clearTimeline', 'runChoreography', 'customKind', 'customEulerFields',
   'customVelocityFields', 'customDirection', 'customSpeed', 'customSpeedUnit',
   'customRoll', 'customPitch', 'customYaw',
@@ -53,6 +54,10 @@ let nextAutoConnectAt = 0;
 const autoConnectMinimumDelayMs = 10000;
 const autoConnectMaximumDelayMs = 60000;
 let autoConnectDelayMs = autoConnectMinimumDelayMs;
+let previouslyConnectedRobotIds = new Set();
+let draftInitialized = false;
+let draftSaveTimer = null;
+let draftSaveSequence = Promise.resolve();
 
 function now() { return new Date().toLocaleTimeString('zh-CN', { hour12: false }); }
 
@@ -193,6 +198,18 @@ function installRobotCardSelection(card) {
 function renderFleet(fleet) {
   if (!fleet || marqueeDrag) return;
   current.fleet = fleet;
+  const connectedRobotIds = new Set(
+    (fleet.robots || []).filter((robot) => robot.connected).map((robot) => robot.id),
+  );
+  const droppedRobotIds = [...previouslyConnectedRobotIds].filter(
+    (robotId) => !connectedRobotIds.has(robotId),
+  );
+  if (droppedRobotIds.length) {
+    nextAutoConnectAt = 0;
+    autoConnectDelayMs = autoConnectMinimumDelayMs;
+    log(`检测到 ${droppedRobotIds.join('、')} 连接中断，已安排立即补连。`, 'warning');
+  }
+  previouslyConnectedRobotIds = connectedRobotIds;
   const configuredIds = (fleet.robots || []).map((robot) => robot.id);
   if (!selectionInitialized && configuredIds.length) {
     selectedRobotIds = new Set();
@@ -391,6 +408,7 @@ async function perform(label, path, body = {}) {
     ui.highRiskPhrase.value = '';
     try {
       render(await api('/api/status'));
+      await maybeAutoConnect();
     } catch (error) {
       render({ busy: false });
       log('状态同步失败：' + error.message, 'error');
@@ -410,6 +428,125 @@ function executeLibraryAction(action) {
 
 function timelineSeconds() { return timeline.reduce((sum, step) => sum + Number(step.duration), 0); }
 
+function draftPayload(steps = timeline) {
+  return {
+    version: 1,
+    saved_at_ms: Date.now(),
+    steps: steps.map((step) => ({ ...step })),
+  };
+}
+
+function writeLocalDraft(payload, { onlyIfNewer = false } = {}) {
+  try {
+    if (onlyIfNewer) {
+      const existing = JSON.parse(localStorage.getItem(draftStorageKey) || 'null');
+      if (Number(existing?.saved_at_ms || 0) > Number(payload.saved_at_ms || 0)) {
+        return true;
+      }
+    }
+    localStorage.setItem(draftStorageKey, JSON.stringify(payload));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readLocalDraft() {
+  try {
+    const currentDraft = JSON.parse(localStorage.getItem(draftStorageKey) || 'null');
+    if (
+      currentDraft && Array.isArray(currentDraft.steps) &&
+      currentDraft.steps.length <= 12
+    ) return { found: true, ...currentDraft };
+
+    const legacy = JSON.parse(localStorage.getItem(legacyDraftStorageKey) || 'null');
+    if (Array.isArray(legacy) && legacy.length <= 12) {
+      const migrated = draftPayload(legacy);
+      writeLocalDraft(migrated);
+      return { found: true, ...migrated };
+    }
+  } catch {
+    try { localStorage.removeItem(draftStorageKey); } catch { /* unavailable */ }
+  }
+  return { found: false, saved_at_ms: 0, steps: [] };
+}
+
+function setDraftStatus(message, kind = '') {
+  if (!ui.draftStatus) return;
+  ui.draftStatus.textContent = message;
+  ui.draftStatus.className = `draft-status ${kind}`.trim();
+}
+
+function queueServerDraftSave(payload, announce = false) {
+  draftSaveSequence = draftSaveSequence
+    .catch(() => null)
+    .then(() => api('/api/choreographies/draft', {
+      method: 'PUT',
+      body: { steps: payload.steps },
+    }))
+    .then((saved) => {
+      const synchronized = { ...payload, saved_at_ms: saved.saved_at_ms };
+      const browserSaved = writeLocalDraft(synchronized, { onlyIfNewer: true });
+      setDraftStatus(
+        browserSaved ? '已自动保存 · 浏览器 + 本机面板' : '已自动保存 · 本机面板',
+        'success',
+      );
+      if (announce) log('编舞草稿已保存到浏览器和本机面板。', 'success');
+      return saved;
+    })
+    .catch((error) => {
+      setDraftStatus('浏览器已保存 · 面板备份失败', 'warning');
+      if (announce) log(`编舞面板备份失败：${error.message}`, 'warning');
+      throw error;
+    });
+  return draftSaveSequence;
+}
+
+function persistDraft({ immediate = false, announce = false } = {}) {
+  const payload = draftPayload();
+  if (writeLocalDraft(payload)) {
+    setDraftStatus('浏览器已保存 · 正在同步面板…');
+  } else {
+    setDraftStatus('浏览器缓存不可用 · 正在同步面板…', 'warning');
+  }
+  if (draftSaveTimer) window.clearTimeout(draftSaveTimer);
+  const synchronize = () => {
+    draftSaveTimer = null;
+    queueServerDraftSave(payload, announce).catch(() => null);
+  };
+  if (immediate) synchronize();
+  else draftSaveTimer = window.setTimeout(synchronize, 350);
+}
+
+async function restoreDraft() {
+  const localDraft = readLocalDraft();
+  let serverDraft = { found: false, saved_at_ms: 0, steps: [] };
+  try {
+    serverDraft = await api('/api/choreographies/draft');
+  } catch (error) {
+    setDraftStatus(`面板备份读取失败：${error.message}`, 'warning');
+  }
+  const candidates = [localDraft, serverDraft].filter(
+    (draft) => draft.found && Array.isArray(draft.steps),
+  );
+  const restored = candidates.sort(
+    (left, right) => Number(right.saved_at_ms || 0) - Number(left.saved_at_ms || 0),
+  )[0];
+  draftInitialized = true;
+  if (!restored) {
+    setDraftStatus('尚无缓存；首次编辑后自动保存');
+    return false;
+  }
+  timeline = restored.steps.map((step) => ({ ...step }));
+  renderTimeline({ persist: false });
+  writeLocalDraft(restored);
+  setDraftStatus('已恢复上次编舞', 'success');
+  if (restored === localDraft && Number(localDraft.saved_at_ms) > Number(serverDraft.saved_at_ms || 0)) {
+    queueServerDraftSave(localDraft).catch(() => null);
+  }
+  return true;
+}
+
 function customStepLabel(step) {
   if (step.kind === 'euler') return `自定义姿态 · R ${Number(step.roll).toFixed(2)} / P ${Number(step.pitch).toFixed(2)} / Y ${Number(step.yaw).toFixed(2)}`;
   if (step.kind === 'velocity') {
@@ -421,7 +558,7 @@ function customStepLabel(step) {
   return step.kind || '未知自定义动作';
 }
 
-function renderTimeline() {
+function renderTimeline({ persist = true } = {}) {
   ui.timeline.innerHTML = '';
   timeline.forEach((step, index) => {
     const action = current.actions.find((item) => item.id === step.action);
@@ -440,6 +577,7 @@ function renderTimeline() {
     item.append(number, copy, controls); ui.timeline.appendChild(item);
   });
   ui.timelineTotal.textContent = `${timeline.length} 步 · ${timelineSeconds().toFixed(1)} 秒`; updateControlLocks();
+  if (persist && draftInitialized) persistDraft();
 }
 
 function loadFeatured() {
@@ -632,10 +770,16 @@ ui.addCustomStep.addEventListener('click', () => {
 });
 updateVelocitySpeedBounds(); updateCustomFields();
 ui.loadFeatured.addEventListener('click', loadFeatured); ui.clearTimeline.addEventListener('click', () => { timeline = []; renderTimeline(); });
-ui.saveDraft.addEventListener('click', () => { localStorage.setItem(draftStorageKey, JSON.stringify(timeline)); log('编舞草稿已保存在本机浏览器。', 'success'); });
-ui.loadDraft.addEventListener('click', () => {
-  try { const draft = JSON.parse(localStorage.getItem(draftStorageKey) || '[]'); if (!Array.isArray(draft)) throw new Error(); timeline = draft; renderTimeline(); log('已读取本机编舞草稿。', 'success'); }
-  catch { log('草稿格式无效，未载入。', 'error'); }
+ui.saveDraft.addEventListener('click', () => {
+  persistDraft({ immediate: true, announce: true });
+});
+ui.loadDraft.addEventListener('click', async () => {
+  try {
+    const restored = await restoreDraft();
+    log(restored ? '已读取最近的编舞草稿。' : '当前没有已保存的编舞草稿。', restored ? 'success' : 'warning');
+  } catch (error) {
+    log(`草稿读取失败：${error.message}`, 'error');
+  }
 });
 
 async function poll() {
@@ -678,6 +822,12 @@ async function maybeAutoConnect() {
   }
 }
 
-poll(); window.setInterval(() => {
-  if (!current.busy && !marqueeDrag) poll();
-}, preferences.pollIntervalMs);
+async function bootstrap() {
+  featuredAutoLoaded = await restoreDraft();
+  await poll();
+  window.setInterval(() => {
+    if (!current.busy && !marqueeDrag) poll();
+  }, preferences.pollIntervalMs);
+}
+
+bootstrap();

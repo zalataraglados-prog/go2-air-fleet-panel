@@ -4,24 +4,28 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+import socket
 import sys
 import threading
+import time
+import webbrowser
 
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from go2.config import ConfigurationError, load_config  # noqa: E402
+from go2.config import ConfigurationError, DATA_ROOT, load_config  # noqa: E402
 from go2.autoconnect import auto_connect_until_ready  # noqa: E402
 from go2.panel import RobotPanelSession, create_panel_app  # noqa: E402
 
 
 LOGGER = logging.getLogger(__name__)
-DEFAULT_LOG_PATH = ROOT / "logs" / "panel.log"
+DEFAULT_LOG_PATH = DATA_ROOT / "logs" / "panel.log"
 
 
 class _RawTransportFrameFilter(logging.Filter):
@@ -74,18 +78,59 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", help="Optional YAML configuration path")
     parser.add_argument("--port", type=int, default=8765, help="Local port (default: 8765)")
+    parser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Open the workbench in the default browser after startup",
+    )
     return parser.parse_args()
+
+
+def panel_url(port: int) -> str:
+    return f"http://127.0.0.1:{port}"
+
+
+def panel_is_listening(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def open_browser_when_ready(port: int) -> None:
+    for _ in range(40):
+        if panel_is_listening(port):
+            webbrowser.open(panel_url(port))
+            return
+        time.sleep(0.25)
+
+
+def show_startup_error(message: str) -> None:
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
+        ctypes.windll.user32.MessageBoxW(  # type: ignore[attr-defined]
+            0,
+            message,
+            "GO2 Air Fleet Panel",
+            0x10,
+        )
+    else:
+        print(message, file=sys.stderr)
 
 
 def main() -> int:
     args = parse_args()
     if not 1024 <= args.port <= 65535:
-        print("--port must be between 1024 and 65535", file=sys.stderr)
+        show_startup_error("--port must be between 1024 and 65535")
         return 2
+    if panel_is_listening(args.port):
+        if args.open_browser:
+            webbrowser.open(panel_url(args.port))
+        return 0
     try:
         config = load_config(args.config)
     except ConfigurationError as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
+        show_startup_error(f"Configuration error: {exc}")
         return 2
 
     log_path = configure_logging(config.logging.level)
@@ -105,10 +150,17 @@ def main() -> int:
         name="go2-panel-auto-connect",
         daemon=True,
     )
-    print(f"GO2_PANEL=http://127.0.0.1:{args.port}")
+    print(f"GO2_PANEL={panel_url(args.port)}")
     print("The panel is local-only. Fleet auto-connect uses read-only discovery.")
     try:
         auto_connect_thread.start()
+        if args.open_browser:
+            threading.Thread(
+                target=open_browser_when_ready,
+                args=(args.port,),
+                name="go2-panel-browser",
+                daemon=True,
+            ).start()
         app.run(
             host="127.0.0.1",
             port=args.port,

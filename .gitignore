@@ -4,11 +4,15 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+build/
+dist/
 
 .env
 .env.*
 !.env.example
 config/config.yaml
+config/choreography-draft.json
+config/choreography-draft.json.tmp
 
 *.log
 logs/

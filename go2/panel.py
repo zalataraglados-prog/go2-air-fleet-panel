@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import Future
 from dataclasses import asdict
+import json
 import logging
+from pathlib import Path
 import secrets
 import threading
 import time
@@ -19,7 +21,7 @@ from .actions import (
     FEATURED_CHOREOGRAPHY,
     public_action_library,
 )
-from .config import AppConfig, PROJECT_ROOT
+from .config import AppConfig, DATA_ROOT, PROJECT_ROOT
 from .connection import Go2Connection, Go2ConnectionError
 from .custom_motion import (
     VELOCITY_DIRECTIONS,
@@ -39,6 +41,7 @@ from .safety import (
     validate_stand_preflight,
 )
 from .state import Go2StateReader, StateError, StateSnapshot
+from .version import __version__
 
 
 MAX_CHOREOGRAPHY_STEPS = 12
@@ -46,6 +49,10 @@ MAX_CHOREOGRAPHY_SECONDS = 40.0
 VELOCITY_STREAM_HZ = 8
 VELOCITY_PERIOD_SECONDS = 1.0 / VELOCITY_STREAM_HZ
 VELOCITY_ACK_TIMEOUT_SECONDS = 1.2
+CHOREOGRAPHY_DRAFT_VERSION = 1
+DEFAULT_CHOREOGRAPHY_DRAFT_PATH = (
+    DATA_ROOT / "config" / "choreography-draft.json"
+)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -210,6 +217,70 @@ def validate_choreography_steps(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+class ChoreographyDraftStore:
+    """Thread-safe, validated, atomic storage for the editor's local draft."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path.resolve()
+        self._lock = threading.Lock()
+
+    def load(self) -> dict[str, Any]:
+        with self._lock:
+            if not self.path.exists():
+                return {
+                    "found": False,
+                    "version": CHOREOGRAPHY_DRAFT_VERSION,
+                    "saved_at_ms": 0,
+                    "steps": [],
+                }
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+                if not isinstance(payload, Mapping):
+                    raise ValueError("draft root is not an object")
+                raw_steps = payload.get("steps")
+                steps = [] if raw_steps == [] else validate_choreography_steps(raw_steps)
+                saved_at_ms = payload.get("saved_at_ms", 0)
+                if (
+                    isinstance(saved_at_ms, bool)
+                    or not isinstance(saved_at_ms, (int, float))
+                    or saved_at_ms < 0
+                ):
+                    raise ValueError("draft timestamp is invalid")
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                LOGGER.warning(
+                    "Choreography draft could not be loaded: error=%s",
+                    type(exc).__name__,
+                )
+                return {
+                    "found": False,
+                    "version": CHOREOGRAPHY_DRAFT_VERSION,
+                    "saved_at_ms": 0,
+                    "steps": [],
+                    "warning": "The saved choreography draft is invalid and was ignored.",
+                }
+            return {
+                "found": True,
+                "version": CHOREOGRAPHY_DRAFT_VERSION,
+                "saved_at_ms": round(float(saved_at_ms)),
+                "steps": steps,
+            }
+
+    def save(self, value: Any) -> dict[str, Any]:
+        steps = [] if value == [] else validate_choreography_steps(value)
+        payload = {
+            "version": CHOREOGRAPHY_DRAFT_VERSION,
+            "saved_at_ms": round(time.time() * 1000),
+            "steps": steps,
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(encoded, encoding="utf-8")
+            temporary.replace(self.path)
+        return {"found": True, **payload}
+
+
 class RobotPanelSession:
     """Own one event loop and one reusable WebRTC connection for the panel."""
 
@@ -233,7 +304,7 @@ class RobotPanelSession:
         self._last_snapshot: StateSnapshot | None = None
         self._action_results: dict[str, dict[str, Any]] = {}
         self._response_times_ms: dict[str, int] = {}
-        self._late_response_tasks: set[asyncio.Task[Any]] = set()
+        self._late_response_tasks: set[asyncio.Future[Any]] = set()
         self._motion_mode: str | None = None
         self._motion_mode_status = "not_checked"
         self._motion_mode_checked_at: str | None = None
@@ -311,6 +382,7 @@ class RobotPanelSession:
         connection = self._connection
         transport = connection.transport_state if connection else None
         return {
+            "version": __version__,
             "connected": bool(
                 connection
                 and connection.is_connected
@@ -685,7 +757,21 @@ class RobotPanelSession:
         ]
         await asyncio.sleep(0)
         gate.set()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results_future = asyncio.gather(*tasks, return_exceptions=True)
+        while not results_future.done():
+            await asyncio.wait({results_future}, timeout=0.1)
+            dropped = [
+                profile.label
+                for profile, connection in pairs
+                if not connection.is_connected or not connection.data_channel_ready
+            ]
+            if dropped:
+                self._retain_background_future(results_future)
+                raise MotionError(
+                    f"{command} 执行期间连接中断：{'、'.join(dropped)}；"
+                    "已立即中止动作链并开始安全停止。"
+                )
+        results = await results_future
         failures = [result for result in results if isinstance(result, BaseException)]
         if failures:
             first = failures[0]
@@ -715,6 +801,22 @@ class RobotPanelSession:
                 2,
             ) if timestamps else 0.0,
         }
+
+    def _retain_background_future(self, future: asyncio.Future[Any]) -> None:
+        """Consume a sent request later without extending the active step."""
+
+        if not hasattr(self, "_late_response_tasks"):
+            self._late_response_tasks = set()
+        self._late_response_tasks.add(future)
+
+        def consume(completed: asyncio.Future[Any]) -> None:
+            self._late_response_tasks.discard(completed)
+            try:
+                completed.result()
+            except BaseException:
+                pass
+
+        future.add_done_callback(consume)
 
     def _publish_selected_velocity_keepalive(
         self,
@@ -781,6 +883,8 @@ class RobotPanelSession:
         next_tick = started + VELOCITY_PERIOD_SECONDS
         while next_tick < deadline:
             await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
+            if time.monotonic() >= deadline:
+                break
             if self._stop_generation != stop_generation:
                 raise MotionError("编舞已由 STOP SELECTED 中止。")
             if acknowledgement_task.done() and not acknowledgement_observed:
@@ -798,13 +902,25 @@ class RobotPanelSession:
                 ),
             )
             frame_count += 1
-            next_tick = started + frame_count * VELOCITY_PERIOD_SECONDS
+            completed_time = time.monotonic()
+            # Never replay missed ticks in a burst after event-loop or SCTP
+            # backpressure. One fresh frame is enough to renew the command.
+            next_tick += VELOCITY_PERIOD_SECONDS
+            if completed_time >= next_tick:
+                next_tick = completed_time + VELOCITY_PERIOD_SECONDS
         await asyncio.sleep(max(0.0, deadline - time.monotonic()))
         if not acknowledgement_observed:
-            try:
-                acknowledgement = await acknowledgement_task
-            except CommandResponseTimeout:
+            if acknowledgement_task.done():
+                try:
+                    acknowledgement = await acknowledgement_task
+                except CommandResponseTimeout:
+                    acknowledgement_timed_out = True
+            else:
+                # A congested SDK response resolver must never stretch a
+                # velocity step beyond its explicit deadline.  The sent
+                # request is retained and consumed in the background.
                 acknowledgement_timed_out = True
+                self._retain_background_future(acknowledgement_task)
             acknowledgement_observed = True
         if acknowledgement is not None:
             maximum_skew_ms = max(
@@ -1570,9 +1686,10 @@ class RobotPanelSession:
                 delay = remaining_step_delay(step["duration"], elapsed)
                 LOGGER.info(
                     "GO2 choreography step timing: step=%d label=%s "
-                    "elapsed_ms=%d remaining_ms=%d targets=%s",
+                    "planned_ms=%d elapsed_ms=%d remaining_ms=%d targets=%s",
                     index,
                     label,
+                    round(step["duration"] * 1000),
                     round(elapsed * 1000),
                     round(delay * 1000),
                     ",".join(robot_ids),
@@ -1659,6 +1776,7 @@ def create_panel_app(
     config: AppConfig,
     *,
     session: PanelSessionProtocol | None = None,
+    draft_path: Path | None = None,
 ) -> Flask:
     """Create the loopback-only Flask application."""
 
@@ -1676,8 +1794,12 @@ def create_panel_app(
     panel_session = session or RobotPanelSession(config)
     csrf_token = secrets.token_urlsafe(32)
     configured_robot_ids = tuple(profile.id for profile in config.robots)
+    draft_store = ChoreographyDraftStore(
+        draft_path or DEFAULT_CHOREOGRAPHY_DRAFT_PATH
+    )
     app.extensions["go2_panel_session"] = panel_session
     app.extensions["go2_panel_csrf"] = csrf_token
+    app.extensions["go2_choreography_draft_store"] = draft_store
 
     @app.after_request
     def security_headers(response: Any) -> Any:
@@ -1777,6 +1899,18 @@ def create_panel_app(
                 "duration": round(sum(step["duration"] for step in steps), 2),
             }
         )
+
+    @app.get("/api/choreographies/draft")
+    def load_choreography_draft() -> Any:
+        return jsonify(draft_store.load())
+
+    @app.put("/api/choreographies/draft")
+    def save_choreography_draft() -> Any:
+        require_panel_request()
+        body = request.get_json(silent=True)
+        if not isinstance(body, Mapping):
+            raise ValueError("Choreography draft request must be a JSON object.")
+        return jsonify(draft_store.save(body.get("steps")))
 
     @app.post("/api/choreographies/run")
     def run_choreography() -> Any:

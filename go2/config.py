@@ -8,15 +8,24 @@ import logging
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Any, Mapping
 
 from dotenv import load_dotenv
 import yaml
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
-EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "config.example.yaml"
+RESOURCE_ROOT = Path(
+    getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])
+).resolve()
+PROJECT_ROOT = RESOURCE_ROOT
+DATA_ROOT = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else PROJECT_ROOT
+)
+DEFAULT_CONFIG_PATH = DATA_ROOT / "config" / "config.yaml"
+EXAMPLE_CONFIG_PATH = RESOURCE_ROOT / "config" / "config.example.yaml"
 LOCAL_AP_IP = "192.168.12.1"
 
 
@@ -185,7 +194,7 @@ def load_config(
 
     if environ is None:
         if load_env_file:
-            load_dotenv(PROJECT_ROOT / ".env", override=False)
+            load_dotenv(DATA_ROOT / ".env", override=False)
         env: Mapping[str, str] = os.environ
     else:
         env = environ

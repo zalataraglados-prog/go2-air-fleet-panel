@@ -11,7 +11,7 @@ The application manages up to 16 independent robots, provides RTS-style target s
 - Local STA and local AP WebRTC connectivity through `unitree_webrtc_connect`.
 - Serial-number discovery and WebRTC ICE host candidates are constrained to the primary physical private-LAN subnet; VPN, overlay, host-only, link-local, and unrelated subnets are excluded.
 - Automatic recovery after Wi-Fi changes; cached addresses are optional, live discovery takes precedence, and cross-subnet or `169.254.*` caches are rejected.
-- Startup auto-connect with bounded exponential backoff and no motion commands.
+- Startup auto-connect with bounded exponential backoff and no motion commands; a previously healthy robot that drops is retried immediately before backoff resumes.
 - Partial fleet tolerance: an offline robot does not tear down healthy sessions or block explicitly selected online robots.
 - RTS-style single, additive, select-all, clear, and drag-box selection, with no robot selected by default.
 - Per-robot read-only state, motion-mode detection, response classification, and timing.
@@ -19,8 +19,8 @@ The application manages up to 16 independent robots, provides RTS-style target s
 - DataChannel-only WebRTC sessions omit unused audio/video RTP transceivers, reducing each robot to one ICE transport and a smaller UDP footprint.
 - Separate action workbench and settings/connection center.
 - Local browser preferences for automatic connection, polling interval, and compact cards.
-- A visual choreography editor limited to 12 steps and 40 seconds, including bounded body-relative forward, backward, lateral, and in-place rotation steps.
-- `163` offline tests covering configuration, discovery, connection lifecycle, safety gates, protocol parsing, fleet behavior, and auto-connect retries.
+- A visual choreography editor limited to 12 steps and 40 seconds, including bounded body-relative forward, backward, lateral, and in-place rotation steps. Every edit is automatically cached in both browser storage and an atomic local panel draft.
+- `168` offline tests covering configuration, discovery, connection lifecycle, safety gates, protocol parsing, fleet behavior, draft persistence, and auto-connect retries.
 
 The current interface is localized in Simplified Chinese. Repository documentation, Git history, and release notes are maintained in English.
 
@@ -51,7 +51,13 @@ Versions tested by this project are pinned in `requirements.txt`, including `uni
 
 ## Installation
 
-Windows PowerShell:
+### Windows installer
+
+Download `GO2-Air-Fleet-Panel-Setup-v1.1.0.exe` from the GitHub release and run it. The per-user installer does not require administrator privileges and installs an independent runtime, an uninstaller, and Start menu and desktop shortcuts. Python is not required on the destination PC.
+
+Before the first connection, open the installation directory from the Start menu shortcut named **Open configuration folder** and fill in the generated `.env` file. Upgrades preserve `.env`, `config/config.yaml`, logs, and choreography drafts. The published installer is not code-signed, so Windows SmartScreen may display an unrecognized-publisher warning.
+
+### Source installation on Windows
 
 ```powershell
 git clone https://github.com/zalataraglados-prog/go2-air-fleet-panel.git
@@ -208,7 +214,7 @@ Exceptions are sanitized before they reach the browser or normal logs.
 
 The built-in **Luminous Tail** choreography uses conservative, already accepted Euler primitives. It does not expose joint-level trajectories.
 
-Choreography locomotion streams the official high-level `Move(vx, vy, vyaw)` RPC at 8 Hz so firmware command expiry cannot turn a held direction into a short nudge. The editor exposes only six single-axis directions, caps forward/backward speed at `0.25 m/s`, lateral speed at `0.30 m/s`, yaw rate at `0.50 rad/s`, and each locomotion step at three seconds. Consecutive velocity steps switch directly and issue one `StopMove` only at the end of the contiguous chain. Transitions to non-velocity steps also stop first, and **STOP SELECTED** remains available while a choreography is running. The checked first-frame acknowledgement allows 1.2 seconds for multi-robot response jitter without pausing the 8 Hz stream.
+Choreography locomotion streams the official high-level `Move(vx, vy, vyaw)` RPC at 8 Hz so firmware command expiry cannot turn a held direction into a short nudge. The editor exposes only six single-axis directions, caps forward/backward speed at `0.25 m/s`, lateral speed at `0.30 m/s`, yaw rate at `0.50 rad/s`, and each locomotion step at three seconds. Consecutive velocity steps switch directly and issue one `StopMove` only at the end of the contiguous chain. Transitions to non-velocity steps also stop first, and **STOP SELECTED** remains available while a choreography is running. The checked first-frame acknowledgement allows 1.2 seconds for multi-robot response jitter without pausing the 8 Hz stream. Delayed scheduler ticks are skipped instead of replayed in a burst, and acknowledgement resolution cannot extend a velocity step past its deadline. If any selected DataChannel closes during a checked action, the chain fails fast and attempts the safety stop immediately.
 
 These locomotion steps are open-loop and relative to each robot's current body heading. Duration does not guarantee an exact distance or angle. They do not provide shared-map localization, obstacle-aware navigation, or closed-loop formation keeping.
 
@@ -219,6 +225,17 @@ python -m pytest -q
 ```
 
 The test suite uses fake robot transports and does not connect to hardware or send motion commands.
+
+## Building the Windows installer
+
+Install Inno Setup 6.7.3, then run:
+
+```powershell
+python -m pip install -r requirements-build.txt
+.\scripts\build_installer.ps1
+```
+
+The reproducible build emits `dist/installer/GO2-Air-Fleet-Panel-Setup-v1.1.0.exe`. Build output is Git-ignored.
 
 ## Community UI review
 

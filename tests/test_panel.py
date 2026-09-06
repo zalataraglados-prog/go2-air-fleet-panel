@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -117,7 +118,7 @@ class FakePanelSession:
 
 
 @pytest.fixture
-def panel() -> tuple[Any, FakePanelSession, str]:
+def panel(tmp_path: Any) -> tuple[Any, FakePanelSession, str]:
     config = load_config(
         environ={
             "UNITREE_ROBOT_IP": "192.168.1.2",
@@ -140,7 +141,11 @@ def panel() -> tuple[Any, FakePanelSession, str]:
         load_env_file=False,
     )
     session = FakePanelSession()
-    app = create_panel_app(config, session=session)
+    app = create_panel_app(
+        config,
+        session=session,
+        draft_path=tmp_path / "choreography-draft.json",
+    )
     app.testing = True
     return app.test_client(), session, app.extensions["go2_panel_csrf"]
 
@@ -162,6 +167,7 @@ def test_index_contains_no_secret_and_has_security_headers(panel: Any) -> None:
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
     assert "框选执行对象" in response.get_data(as_text=True)
     assert "默认不选择任何设备" in response.get_data(as_text=True)
+    assert 'id="draftStatus"' in response.get_data(as_text=True)
     assert 'href="/settings"' in response.get_data(as_text=True)
     assert "连接 / 重试可用机器狗" not in response.get_data(as_text=True)
     assert "转圈" not in response.get_data(as_text=True)
@@ -188,6 +194,52 @@ def test_mutating_request_requires_panel_token(panel: Any) -> None:
     response = client.post("/api/connect", json={})
     assert response.status_code == 403
     assert session.calls == []
+
+
+def test_choreography_draft_is_persisted_and_empty_draft_is_preserved(
+    panel: Any,
+) -> None:
+    client, _, token = panel
+    assert client.get("/api/choreographies/draft").get_json() == {
+        "found": False,
+        "saved_at_ms": 0,
+        "steps": [],
+        "version": 1,
+    }
+    assert client.put(
+        "/api/choreographies/draft",
+        json={"steps": [{"kind": "wait", "duration": 1.5}]},
+    ).status_code == 403
+
+    saved = client.put(
+        "/api/choreographies/draft",
+        headers=headers(token),
+        json={"steps": [{"kind": "wait", "duration": 1.5}]},
+    )
+    assert saved.status_code == 200
+    assert saved.get_json()["steps"] == [{"kind": "wait", "duration": 1.5}]
+    loaded = client.get("/api/choreographies/draft").get_json()
+    assert loaded["found"] is True
+    assert loaded["saved_at_ms"] > 0
+    assert loaded["steps"] == [{"kind": "wait", "duration": 1.5}]
+
+    cleared = client.put(
+        "/api/choreographies/draft",
+        headers=headers(token),
+        json={"steps": []},
+    )
+    assert cleared.status_code == 200
+    assert client.get("/api/choreographies/draft").get_json()["steps"] == []
+
+
+def test_choreography_draft_rejects_unvalidated_steps(panel: Any) -> None:
+    client, _, token = panel
+    response = client.put(
+        "/api/choreographies/draft",
+        headers=headers(token),
+        json={"steps": [{"action": "not_allowlisted", "duration": 2}]},
+    )
+    assert response.status_code == 400
 
 
 def test_unexpected_error_does_not_falsely_claim_nothing_was_sent(panel: Any) -> None:
@@ -675,11 +727,13 @@ async def test_velocity_stream_refreshes_move_rpc_at_8hz() -> None:
     )
 
     assert result["stream_hz"] == 8
-    assert result["frame_count"] == 3
+    assert result["frame_count"] in {2, 3}
     assert result["codes"] == {"dog_1": 0}
     assert calls == ["custom:velocity"]
     assert timeouts == [1.2]
-    assert connection.keepalives == [("clockwise", 0.35)] * 2
+    assert connection.keepalives == [
+        ("clockwise", 0.35)
+    ] * (result["frame_count"] - 1)
 
 
 @pytest.mark.asyncio
@@ -713,4 +767,128 @@ async def test_velocity_stream_keeps_refreshing_when_first_ack_is_late() -> None
 
     assert result["acknowledgement_timed_out"] is True
     assert result["accepted"] == {"dog_1": None}
+    assert connection.keepalive_count in {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_velocity_stream_does_not_wait_past_its_deadline_for_ack() -> None:
+    class FakeVelocityConnection:
+        def publish_velocity_keepalive(
+            self, direction: str, speed: float
+        ) -> None:
+            pass
+
+    session = RobotPanelSession.__new__(RobotPanelSession)
+    session._stop_generation = 0
+    session._late_response_tasks = set()
+
+    async def delayed_checked_command(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        await asyncio.sleep(0.2)
+        return {
+            "codes": {"dog_1": 0},
+            "accepted": {"dog_1": True},
+            "response_shapes": {"dog_1": "native:code"},
+            "start_skew_ms": 0.0,
+        }
+
+    session._selected_checked_command = delayed_checked_command
+    started = asyncio.get_running_loop().time()
+    result = await session._stream_selected_velocity(
+        [
+            (
+                SimpleNamespace(id="dog_1", label="机器狗 1"),
+                FakeVelocityConnection(),
+            )
+        ],
+        direction="forward",
+        speed=0.15,
+        duration=0.05,
+        stop_generation=0,
+        step_index=1,
+        label="前进",
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 0.15
+    assert result["acknowledgement_timed_out"] is True
+    assert session._late_response_tasks
+    await asyncio.sleep(0.25)
+    assert session._late_response_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_velocity_stream_does_not_burst_replay_delayed_ticks() -> None:
+    class SlowVelocityConnection:
+        def __init__(self) -> None:
+            self.keepalive_count = 0
+
+        def publish_velocity_keepalive(
+            self, direction: str, speed: float
+        ) -> None:
+            self.keepalive_count += 1
+            time.sleep(0.16)
+
+    session = RobotPanelSession.__new__(RobotPanelSession)
+    session._stop_generation = 0
+    session._late_response_tasks = set()
+
+    async def checked_command(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "codes": {"dog_1": 0},
+            "accepted": {"dog_1": True},
+            "response_shapes": {"dog_1": "native:code"},
+            "start_skew_ms": 0.0,
+        }
+
+    session._selected_checked_command = checked_command
+    connection = SlowVelocityConnection()
+    await session._stream_selected_velocity(
+        [(SimpleNamespace(id="dog_1", label="机器狗 1"), connection)],
+        direction="forward",
+        speed=0.15,
+        duration=0.45,
+        stop_generation=0,
+        step_index=1,
+        label="前进",
+    )
+
     assert connection.keepalive_count == 2
+
+
+@pytest.mark.asyncio
+async def test_selected_command_fails_fast_when_a_target_channel_closes() -> None:
+    class FakeConnection:
+        is_connected = True
+        data_channel_ready = True
+
+    session = RobotPanelSession.__new__(RobotPanelSession)
+    session._action_results = {}
+    session._response_times_ms = {}
+    session._late_response_tasks = set()
+    connection = FakeConnection()
+
+    async def delayed_response(_: Any) -> dict[str, Any]:
+        await asyncio.sleep(0.3)
+        return {"data": {"header": {"status": {"code": 0}}}}
+
+    async def close_channel() -> None:
+        await asyncio.sleep(0.02)
+        connection.is_connected = False
+        connection.data_channel_ready = False
+
+    asyncio.create_task(close_channel())
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(MotionError, match="连接中断"):
+        await session._selected_checked_command(
+            [(SimpleNamespace(id="dog_1", label="机器狗 1"), connection)],
+            "测试动作",
+            delayed_response,
+            timeout=1.0,
+            result_id="test_action",
+        )
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 0.25
+    assert session._late_response_tasks
+    await asyncio.sleep(0.3)
+    assert session._late_response_tasks == set()

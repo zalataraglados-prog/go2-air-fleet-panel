@@ -62,6 +62,9 @@ button:focus-visible,input:focus-visible,select:focus-visible { outline:3px soli
 .stop-button { width:100%; margin-top:14px; padding:14px; border:1px solid rgba(255,79,82,.58); border-radius:12px; background:rgba(255,79,82,.1); color:#ff8d8f; cursor:pointer; }
 .stop-button span { display:block; font-weight:900; letter-spacing:.08em; } .stop-button small { display:block; margin-top:3px; color:#c68b8d; }
 .editor-note { color:var(--muted); margin:16px 0 12px; font-size:.83rem; }
+.draft-status { color:var(--muted); margin:-4px 0 12px; font-size:.78rem; }
+.draft-status.success { color:var(--lime); }
+.draft-status.warning { color:var(--amber); }
 .editor-toolbar { display:grid; grid-template-columns:1fr 125px auto; gap:8px; }
 .editor-toolbar select,.editor-toolbar input { min-height:42px; border:1px solid #35414c; border-radius:9px; background:#10151a; color:var(--text); padding:0 10px; }
 .editor-toolbar label { display:grid; grid-template-columns:auto 1fr; align-items:center; gap:5px; color:var(--muted); font-size:.75rem; } .editor-toolbar label input { width:76px; }

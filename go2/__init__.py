@@ -18,6 +18,7 @@ from .motion import (
     StandResult,
 )
 from .safety import StandSafetyError, StandSafetyLimits, validate_stand_preflight
+from .version import __version__
 
 __all__ = [
     "AppConfig",
@@ -41,4 +42,5 @@ __all__ = [
     "StandSafetyLimits",
     "load_config",
     "validate_stand_preflight",
+    "__version__",
 ]
