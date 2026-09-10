@@ -1,5 +1,7 @@
 # Versions verified for this project on Windows with Python 3.12 (2026-09-02).
 unitree_webrtc_connect==2.2.0
+# Native runtime used by encrypted signaling and explicitly bundled on Windows.
+wasmtime==48.0.0
 # Transitive WebRTC versions actually exercised by the test environment.
 aiortc==1.15.0
 aioice==0.10.2

@@ -7,6 +7,7 @@ import argparse
 import ctypes
 import logging
 from logging.handlers import RotatingFileHandler
+import os
 from pathlib import Path
 import socket
 import sys
@@ -83,6 +84,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Open the workbench in the default browser after startup",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
@@ -98,12 +104,37 @@ def panel_is_listening(port: int) -> bool:
         return False
 
 
+def open_panel_in_browser(port: int) -> None:
+    """Open the panel through Windows ShellExecute with a portable fallback."""
+
+    url = panel_url(port)
+    if sys.platform == "win32":
+        try:
+            os.startfile(url)  # type: ignore[attr-defined]
+            return
+        except OSError:
+            LOGGER.warning("Windows could not open the panel URL; using fallback")
+    webbrowser.open(url)
+
+
 def open_browser_when_ready(port: int) -> None:
     for _ in range(40):
         if panel_is_listening(port):
-            webbrowser.open(panel_url(port))
+            open_panel_in_browser(port)
             return
         time.sleep(0.25)
+
+
+def runtime_self_test() -> bool:
+    """Load the native Wasmtime runtime required by encrypted signaling."""
+
+    try:
+        import wasmtime
+
+        wasmtime.Engine()
+    except Exception:
+        return False
+    return True
 
 
 def show_startup_error(message: str) -> None:
@@ -120,12 +151,14 @@ def show_startup_error(message: str) -> None:
 
 def main() -> int:
     args = parse_args()
+    if args.self_test:
+        return 0 if runtime_self_test() else 1
     if not 1024 <= args.port <= 65535:
         show_startup_error("--port must be between 1024 and 65535")
         return 2
     if panel_is_listening(args.port):
         if args.open_browser:
-            webbrowser.open(panel_url(args.port))
+            open_panel_in_browser(args.port)
         return 0
     try:
         config = load_config(args.config)

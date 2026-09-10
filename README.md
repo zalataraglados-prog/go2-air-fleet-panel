@@ -20,7 +20,7 @@ The application manages up to 16 independent robots, provides RTS-style target s
 - Separate action workbench and settings/connection center.
 - Local browser preferences for automatic connection, polling interval, and compact cards.
 - A visual choreography editor limited to 12 steps and 40 seconds, including bounded body-relative forward, backward, lateral, and in-place rotation steps. Every edit is automatically cached in both browser storage and an atomic local panel draft.
-- `168` offline tests covering configuration, discovery, connection lifecycle, safety gates, protocol parsing, fleet behavior, draft persistence, and auto-connect retries.
+- `170` offline tests covering configuration, discovery, connection lifecycle, safety gates, protocol parsing, fleet behavior, draft persistence, packaged runtime loading, and auto-connect retries.
 
 The current interface is localized in Simplified Chinese. Repository documentation, Git history, and release notes are maintained in English.
 
@@ -53,7 +53,7 @@ Versions tested by this project are pinned in `requirements.txt`, including `uni
 
 ### Windows installer
 
-Download `GO2-Air-Fleet-Panel-Setup-v1.1.0.exe` from the GitHub release and run it. The per-user installer does not require administrator privileges and installs an independent runtime, an uninstaller, and Start menu and desktop shortcuts. Python is not required on the destination PC.
+Download `GO2-Air-Fleet-Panel-Setup-v1.1.1.exe` from the GitHub release and run it. The per-user installer does not require administrator privileges and installs an independent runtime, an uninstaller, and Start menu and desktop shortcuts. Python is not required on the destination PC.
 
 Before the first connection, open the installation directory from the Start menu shortcut named **Open configuration folder** and fill in the generated `.env` file. Upgrades preserve `.env`, `config/config.yaml`, logs, and choreography drafts. The published installer is not code-signed, so Windows SmartScreen may display an unrecognized-publisher warning.
 
@@ -235,7 +235,7 @@ python -m pip install -r requirements-build.txt
 .\scripts\build_installer.ps1
 ```
 
-The reproducible build emits `dist/installer/GO2-Air-Fleet-Panel-Setup-v1.1.0.exe`. Build output is Git-ignored.
+The reproducible build emits `dist/installer/GO2-Air-Fleet-Panel-Setup-v1.1.1.exe`. The build fails unless the packaged Wasmtime native runtime loads successfully. Build output is Git-ignored.
 
 ## Community UI review
 

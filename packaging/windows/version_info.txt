@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 0, 0),
-    prodvers=(1, 1, 0, 0),
+    filevers=(1, 1, 1, 0),
+    prodvers=(1, 1, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName', u'GO2 Air Fleet Panel contributors'),
           StringStruct(u'FileDescription', u'GO2 Air Fleet Panel'),
-          StringStruct(u'FileVersion', u'1.1.0'),
+          StringStruct(u'FileVersion', u'1.1.1'),
           StringStruct(u'InternalName', u'GO2AirFleetPanel'),
           StringStruct(u'OriginalFilename', u'GO2AirFleetPanel.exe'),
           StringStruct(u'ProductName', u'GO2 Air Fleet Panel'),
-          StringStruct(u'ProductVersion', u'1.1.0')
+          StringStruct(u'ProductVersion', u'1.1.1')
         ]
       )
     ]),

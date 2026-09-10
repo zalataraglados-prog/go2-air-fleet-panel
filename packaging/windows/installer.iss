@@ -1,5 +1,5 @@
 #define MyAppName "GO2 Air Fleet Panel"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "GO2 Air Fleet Panel contributors"
 #define MyAppURL "https://github.com/zalataraglados-prog/go2-air-fleet-panel"
 #define MyAppExeName "GO2AirFleetPanel.exe"

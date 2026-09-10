@@ -2,18 +2,19 @@
 
 import os
 
-from PyInstaller.utils.hooks import collect_all, copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, copy_metadata
 
 
 project_root = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 sdk_datas, sdk_binaries, sdk_hiddenimports = collect_all(
     "unitree_webrtc_connect"
 )
+wasmtime_binaries = collect_dynamic_libs("wasmtime")
 
 analysis = Analysis(
     [os.path.join(project_root, "scripts", "panel.py")],
     pathex=[project_root],
-    binaries=sdk_binaries,
+    binaries=sdk_binaries + wasmtime_binaries,
     datas=(
         sdk_datas
         + copy_metadata("unitree_webrtc_connect")

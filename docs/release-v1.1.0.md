@@ -1,5 +1,8 @@
 ## GO2 Air Fleet Panel v1.1.0
 
+> [!WARNING]
+> The v1.1.0 Windows installer omitted the native Wasmtime DLL required by encrypted signaling. Install v1.1.1 or later instead. The source release remains available for historical reference.
+
 This release focuses on multi-robot connection resilience, smoother choreography timing, reliable draft persistence, and straightforward Windows installation.
 
 ### Highlights
