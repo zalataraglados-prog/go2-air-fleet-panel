@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -129,6 +131,29 @@ def settings(**overrides: Any) -> ConnectionConfig:
     }
     values.update(overrides)
     return ConnectionConfig(**values)
+
+
+def test_native_sdk_loader_failure_is_actionable_in_frozen_app(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    original_import = builtins.__import__
+
+    def missing_native_dependency(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "unitree_webrtc_connect":
+            raise OSError("synthetic missing native DLL")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_native_dependency)
+    monkeypatch.setattr(connection_module.sys, "frozen", True, raising=False)
+    with caplog.at_level(logging.ERROR, logger="go2.connection"):
+        with pytest.raises(Go2ConnectionError) as caught:
+            connection_module._load_sdk()
+
+    assert caught.value.kind is FailureKind.DEPENDENCY_MISSING
+    assert "Install the latest release" in str(caught.value)
+    assert "synthetic missing native DLL" not in str(caught.value)
+    assert "synthetic missing native DLL" in caplog.text
 
 
 @pytest.mark.asyncio

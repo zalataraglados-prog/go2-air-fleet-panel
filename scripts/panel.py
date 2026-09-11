@@ -126,12 +126,14 @@ def open_browser_when_ready(port: int) -> None:
 
 
 def runtime_self_test() -> bool:
-    """Load the native Wasmtime runtime required by encrypted signaling."""
+    """Load the native runtime and the real SDK without opening a connection."""
 
     try:
         import wasmtime
+        from go2.connection import _load_sdk
 
         wasmtime.Engine()
+        _load_sdk()
     except Exception:
         return False
     return True

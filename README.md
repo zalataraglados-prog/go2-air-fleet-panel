@@ -20,7 +20,7 @@ The application manages up to 16 independent robots, provides RTS-style target s
 - Separate action workbench and settings/connection center.
 - Local browser preferences for automatic connection, polling interval, and compact cards.
 - A visual choreography editor limited to 12 steps and 40 seconds, including bounded body-relative forward, backward, lateral, and in-place rotation steps. Every edit is automatically cached in both browser storage and an atomic local panel draft.
-- `170` offline tests covering configuration, discovery, connection lifecycle, safety gates, protocol parsing, fleet behavior, draft persistence, packaged runtime loading, and auto-connect retries.
+- `171` offline tests covering configuration, discovery, connection lifecycle, safety gates, protocol parsing, fleet behavior, draft persistence, native-loader error classification, packaged runtime loading, and auto-connect retries.
 
 The current interface is localized in Simplified Chinese. Repository documentation, Git history, and release notes are maintained in English.
 
@@ -235,7 +235,7 @@ python -m pip install -r requirements-build.txt
 .\scripts\build_installer.ps1
 ```
 
-The reproducible build emits `dist/installer/GO2-Air-Fleet-Panel-Setup-v1.1.1.exe`. The build fails unless the packaged Wasmtime native runtime loads successfully. Build output is Git-ignored.
+The reproducible build emits `dist/installer/GO2-Air-Fleet-Panel-Setup-v1.1.1.exe`. The build fails unless the packaged Wasmtime native runtime and the real GO2 SDK load successfully. The Windows CI workflow runs the same frozen-runtime gate after every test pass. Build output is Git-ignored.
 
 ## Community UI review
 

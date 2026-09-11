@@ -8,6 +8,7 @@ from enum import Enum
 import ipaddress
 import json
 import logging
+import sys
 import time
 from typing import Any, Callable, Mapping
 
@@ -111,7 +112,7 @@ class FailureKind(str, Enum):
 
 _SAFE_MESSAGES = {
     FailureKind.CONFIGURATION: "Connection configuration is incomplete or invalid.",
-    FailureKind.DEPENDENCY_MISSING: "unitree_webrtc_connect is not installed.",
+    FailureKind.DEPENDENCY_MISSING: "A required GO2 runtime dependency could not be loaded.",
     FailureKind.ROBOT_NOT_FOUND: "Robot or local signaling ports are unreachable.",
     FailureKind.AES_KEY_MISSING: "This robot requires a per-device AES-128 key.",
     FailureKind.AES_KEY_REJECTED: "The robot rejected the AES-128 key; verify its serial number.",
@@ -191,10 +192,18 @@ def _load_sdk() -> _Sdk:
             WebRTCConnectionMethod,
         )
         from unitree_webrtc_connect import webrtc_driver
-    except ImportError as exc:
+    except (ImportError, OSError) as exc:
+        LOGGER.exception("GO2 SDK dependency failed to load")
+        detail = (
+            "The installed application runtime is incomplete or damaged. "
+            "Install the latest release over the current installation."
+            if getattr(sys, "frozen", False)
+            else "Install project dependencies with: "
+            "python -m pip install -r requirements.txt."
+        )
         raise Go2ConnectionError(
             FailureKind.DEPENDENCY_MISSING,
-            detail="请在项目虚拟环境中执行 pip install -r requirements.txt。",
+            detail=detail,
         ) from exc
     _configure_datachannel_only_driver(webrtc_driver)
     return _Sdk(

@@ -29,18 +29,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller failed with exit code $LASTEXITCODE"
     }
-    $bundleExe = Join-Path $projectRoot 'dist\GO2AirFleetPanel\GO2AirFleetPanel.exe'
-    $wasmtimeDll = Join-Path $projectRoot (
-        'dist\GO2AirFleetPanel\_internal\wasmtime\win32-x86_64\_wasmtime.dll'
-    )
-    if (-not (Test-Path -LiteralPath $wasmtimeDll -PathType Leaf)) {
-        throw "Wasmtime runtime was not bundled: $wasmtimeDll"
-    }
-    $selfTest = Start-Process -FilePath $bundleExe -ArgumentList '--self-test' `
-        -WorkingDirectory (Split-Path -Parent $bundleExe) -Wait -PassThru
-    if ($selfTest.ExitCode -ne 0) {
-        throw "Packaged runtime self-test failed with exit code $($selfTest.ExitCode)"
-    }
+    & (Join-Path $projectRoot 'scripts\test_packaged_runtime.ps1')
     & $isccPath $installerScript
     if ($LASTEXITCODE -ne 0) {
         throw "Inno Setup failed with exit code $LASTEXITCODE"
